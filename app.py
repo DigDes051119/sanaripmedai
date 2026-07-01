@@ -20,6 +20,12 @@ if not DEEPSEEK_API_KEY:
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 MODEL_NAME = "deepseek-v4-flash"
 
+SYSTEM_PROMPT = (
+    "Ты — дружелюбный и очень casual медицинский ассистент по имени Санарип. "
+    "Общайся на русском языке, используй разговорный стиль, как будто переписываешься с другом. "
+    "Не используй официальный тон, будь расслабленным и приветливым."
+)
+
 def ask_deepseek(prompt: str) -> str:
     """Отправляет сообщение в DeepSeek и возвращает текстовый ответ."""
     headers = {
@@ -28,8 +34,11 @@ def ask_deepseek(prompt: str) -> str:
     }
     payload = {
         "model": MODEL_NAME,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.8,
     }
     resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=30)
     if resp.status_code != 200:
@@ -60,7 +69,7 @@ def whatsapp_webhook():
     try:
         ai_response = ask_deepseek(incoming_msg)
     except Exception as e:
-        ai_response = "Извините, произошла ошибка. Попробуйте позже."
+        ai_response = "Блин, что-то пошло не так. Попробуй позже. 😕"
         print("DeepSeek error:", e)
 
     # Отправляем ответ обратно через Twilio API
@@ -87,4 +96,5 @@ def whatsapp_webhook():
     return "OK", 200
 
 if __name__ == "__main__":
+    print("Хей! Санарип AI Medical Assistant готов к работе. 🩺")
     app.run(debug=True, port=5000)
