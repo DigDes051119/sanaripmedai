@@ -25,10 +25,10 @@ if token_missing:
         sys.exit(1)
     else:
         # Для работы в Flask / Vercel не валим весь сервер при импорте, а создаем заглушку
-        bot = telebot.TeleBot("123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ")
+        bot = telebot.TeleBot("123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ", threaded=False)
 else:
     # Инициализируем бота
-    bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+    bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, threaded=False)
 
 # URLs для API
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
