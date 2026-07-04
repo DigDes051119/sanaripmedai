@@ -808,12 +808,21 @@ def receive_webhook():
 @app.route("/webhook/telegram", methods=["POST"])
 def telegram_webhook():
     """Прием обновлений от Telegram через вебхук"""
+    import sys
+    print("LOG: Received webhook request", file=sys.stderr)
     if request.headers.get('content-type') == 'application/json':
         json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
+        print(f"LOG: Webhook payload: {json_string}", file=sys.stderr)
+        try:
+            update = telebot.types.Update.de_json(json_string)
+            print(f"LOG: Parsed update: {update}", file=sys.stderr)
+            bot.process_new_updates([update])
+            print("LOG: Updates processed successfully", file=sys.stderr)
+        except Exception as e:
+            print(f"LOG ERROR: Exception in processing updates: {e}", file=sys.stderr)
         return '', 200
     else:
+        print("LOG: Unsupported Media Type", file=sys.stderr)
         return 'Unsupported Media Type', 403
 
 @app.route("/set_webhook", methods=["GET"])
