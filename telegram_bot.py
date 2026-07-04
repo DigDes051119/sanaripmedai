@@ -90,8 +90,8 @@ try:
 except Exception as e:
     print(f"Ошибка загрузки RAG базы знаний: {e}")
 
-# Запускаем фоновый апдейтер только если мы НЕ на Vercel
-if "VERCEL" not in os.environ:
+# Запускаем фоновый апдейтер только если мы НЕ на Vercel и НЕ на PythonAnywhere
+if "VERCEL" not in os.environ and "PYTHONANYWHERE_DOMAIN" not in os.environ:
     try:
         start_background_updater()
     except Exception as e:
