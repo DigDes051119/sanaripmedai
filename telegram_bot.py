@@ -16,15 +16,19 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # Проверка токена при запуске
-if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "your_telegram_bot_token_here" or ":" not in TELEGRAM_BOT_TOKEN:
-    print("\n[!] ОШИБКА: TELEGRAM_BOT_TOKEN не настроен в файле .env")
-    print("Пожалуйста, создайте бота в Telegram через @BotFather, скопируйте токен и вставьте его в .env.")
-    print("Пример: TELEGRAM_BOT_TOKEN=123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ\n")
-    import sys
-    sys.exit(1)
+token_missing = not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "your_telegram_bot_token_here" or ":" not in TELEGRAM_BOT_TOKEN
 
-# Инициализируем бота
-bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+if token_missing:
+    print("\n[!] ОШИБКА: TELEGRAM_BOT_TOKEN не настроен.")
+    if __name__ == "__main__":
+        import sys
+        sys.exit(1)
+    else:
+        # Для работы в Flask / Vercel не валим весь сервер при импорте, а создаем заглушку
+        bot = telebot.TeleBot("123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ")
+else:
+    # Инициализируем бота
+    bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
 # URLs для API
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
@@ -53,18 +57,23 @@ SPECIALTY_KEYWORDS = {
 }
 
 # Загрузка локальных баз данных
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CLINICS_PATH = os.path.join(BASE_DIR, "data", "clinics.json")
+FIRST_AID_PATH = os.path.join(BASE_DIR, "data", "first_aid.json")
+DISEASES_INDEX_PATH = os.path.join(BASE_DIR, "data", "diseases_index.json")
+
 CLINICS_DB = []
 FIRST_AID_DB = []
 
 try:
-    with open("data/clinics.json", "r", encoding="utf-8") as f:
+    with open(CLINICS_PATH, "r", encoding="utf-8") as f:
         CLINICS_DB = json.load(f).get("clinics", [])
     print(f"Успешно загружено клиник: {len(CLINICS_DB)}")
 except Exception as e:
     print(f"Ошибка загрузки базы клиник: {e}")
 
 try:
-    with open("data/first_aid.json", "r", encoding="utf-8") as f:
+    with open(FIRST_AID_PATH, "r", encoding="utf-8") as f:
         FIRST_AID_DB = json.load(f).get("conditions", [])
     print(f"Успешно загружено инструкций первой помощи: {len(FIRST_AID_DB)}")
 except Exception as e:
@@ -73,18 +82,20 @@ except Exception as e:
 # Инициализация и запуск локальной RAG базы знаний
 DISEASES_INDEX = None
 try:
-    if os.path.exists("data/diseases_index.json"):
-        DISEASES_INDEX = SimpleTFIDFIndex.load("data/diseases_index.json")
+    if os.path.exists(DISEASES_INDEX_PATH):
+        DISEASES_INDEX = SimpleTFIDFIndex.load(DISEASES_INDEX_PATH)
         print("RAG база знаний успешно загружена.")
     else:
-        print("Внимание: RAG база знаний не найдена. Начинается скачивание...")
+        print("Внимание: RAG база знаний не найдена.")
 except Exception as e:
     print(f"Ошибка загрузки RAG базы знаний: {e}")
 
-try:
-    start_background_updater()
-except Exception as e:
-    print(f"Ошибка фоновой службы обновлений RAG: {e}")
+# Запускаем фоновый апдейтер только если мы НЕ на Vercel
+if "VERCEL" not in os.environ:
+    try:
+        start_background_updater()
+    except Exception as e:
+        print(f"Ошибка фоновой службы обновлений RAG: {e}")
 
 
 # Системные промпты с профессиональным, успокаивающим тоном и строгими ограничениями
@@ -439,8 +450,8 @@ def summarize_symptoms_with_llm(chat_id) -> str:
 def save_chat_history(chat_id):
     """Сохраняет историю диалога пользователя на диск для панели разработчика"""
     import time
-    os.makedirs("data/chat_histories", exist_ok=True)
-    file_path = f"data/chat_histories/{chat_id}.json"
+    os.makedirs(os.path.join(BASE_DIR, "data", "chat_histories"), exist_ok=True)
+    file_path = os.path.join(BASE_DIR, "data", "chat_histories", f"{chat_id}.json")
     history = USER_SESSIONS.get(chat_id, [])
     
     # Пытаемся получить имя из состояния, если оно там есть
@@ -474,7 +485,7 @@ def save_emergency_request(chat_id, state_data):
         "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     
-    file_path = "data/emergency_requests.json"
+    file_path = os.path.join(BASE_DIR, "data", "emergency_requests.json")
     data = {"requests": []}
     if os.path.exists(file_path):
         try:

@@ -89,7 +89,8 @@ def dashboard():
     import json
     import os
     
-    file_path = "data/emergency_requests.json"
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(BASE_DIR, "data", "emergency_requests.json")
     requests_list = []
     if os.path.exists(file_path):
         try:
@@ -401,8 +402,8 @@ def developer_panel():
     import os
     import glob
     
-    # Считываем все файлы историй чатов
-    histories_dir = "data/chat_histories"
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    histories_dir = os.path.join(BASE_DIR, "data", "chat_histories")
     chats = []
     
     if os.path.exists(histories_dir):
