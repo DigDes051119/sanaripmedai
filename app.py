@@ -6,6 +6,10 @@ from dotenv import load_dotenv
 # Загружаем переменные окружения
 load_dotenv()
 
+# Импортируем бота для работы через вебхуки на Vercel
+import telebot
+from telegram_bot import bot
+
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
@@ -799,6 +803,27 @@ def receive_webhook():
                                 )
 
     return jsonify({"status": "ok"}), 200
+
+@app.route("/webhook/telegram", methods=["POST"])
+def telegram_webhook():
+    """Прием обновлений от Telegram через вебхук"""
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return '', 200
+    else:
+        return 'Unsupported Media Type', 403
+
+@app.route("/set_webhook", methods=["GET"])
+def set_webhook():
+    """Автоматическая настройка вебхука Telegram на текущий хост"""
+    webhook_url = f"{request.host_url}webhook/telegram"
+    success = bot.set_webhook(url=webhook_url)
+    if success:
+        return f"Webhook successfully set to: {webhook_url}", 200
+    else:
+        return f"Failed to set webhook to: {webhook_url}", 500
 
 if __name__ == "__main__":
     # Запуск сервера
