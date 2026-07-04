@@ -1,0 +1,6 @@
+.aider*
+.env
+__pycache__/
+*.pyc
+data/chat_histories/
+data/emergency_requests.json
