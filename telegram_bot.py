@@ -909,6 +909,7 @@ def handle_location(message):
 
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
+    chat_id = message.chat.id
     bot.reply_to(message, "Фотография получена. Провожу анализ изображения, пожалуйста, подождите... ⏳")
     
     try:
