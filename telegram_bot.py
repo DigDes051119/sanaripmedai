@@ -1,4 +1,80 @@
 import os
+
+import json
+
+import base64
+
+import math
+
+import requests
+
+import telebot
+
+from telebot import types
+
+from dotenv import load_dotenv
+
+from rag_updater import SimpleTFIDFIndex, start_background_updater
+
+
+
+# Загружаем переменные окружения
+
+load_dotenv()
+
+
+
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+
+
+# Проверка токена при запуске
+
+token_missing = not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "your_telegram_bot_token_here" or ":" not in TELEGRAM_BOT_TOKEN
+
+
+
+if token_missing:
+
+    print("\n[!] ОШИБКА: TELEGRAM_BOT_TOKEN не настроен.")
+
+    if __name__ == "__main__":
+
+        import sys
+
+        sys.exit(1)
+
+    else:
+
+        # Для работы в Flask / Vercel не валим весь сервер при импорте, а создаем заглушку
+
+        bot = telebot.TeleBot("123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ", threaded=False)
+
+else:
+
+    # Инициализируем бота
+
+    bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, threaded=False)
+
+
+
+# URLs для API
+
+DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
+
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+
+
+# Конфигурация моделей
+
+DEEPSEEK_MODEL = "deepseek-chat"
+
+import os
 import json
 import base64
 import math
@@ -46,14 +122,28 @@ USER_SESSIONS = {}
 # Структура: { chat_id: {"state": "...", "name": "...", "region": "...", "location": "...", "symptoms": "..."} }
 USER_STATES = {}
 
+# Отслеживание оффтопика и блокировок
+USER_OFFTOPIC_COUNT = {}
+USER_BLOCKED = set()
+
 # Глобальный словарь соответствия симптомов специальностям врачей
 SPECIALTY_KEYWORDS = {
     "педиатр": ["ребенок", "детский", "дети", "малыш", "педиатр", "ребенка"],
     "кардиолог": ["сердце", "грудь", "инфаркт", "кардиолог", "давление", "стенокардия"],
     "офтальмолог": ["глаз", "зрение", "окулист", "катаракта", "офтальмолог", "глаза"],
-    "стоматолог": ["зуб", "десна", "кариес", "стоматолог", "зубы", "зубная"],
+    "стоматолог": ["зуб", "десна", "кариес", "стоматолог", "зубы", "зубная", "пломба"],
     "травматолог": ["сломал", "перелом", "вывих", "ушиб", "травма", "травматолог", "гипс", "растяжение"],
-    "гинеколог": ["беременность", "роды", "гинеколог", "женский", "яичники"]
+    "гинеколог": ["беременность", "роды", "гинеколог", "женский", "яичники", "менструация"],
+    "эндокринолог": ["гормон", "щитовидка", "зоб", "диабет", "сахар", "эндокринолог"],
+    "невролог": ["невролог", "нервы", "мигрень", "спина", "позвоночник", "онемение", "головокружение"],
+    "гастроэнтеролог": ["желудок", "живот", "изжога", "тошнота", "рвота", "понос", "кишечник", "гастроэнтеролог"],
+    "пульмонолог": ["легкие", "кашель", "астма", "бронхит", "дыхание", "пульмонолог"],
+    "дерматолог": ["кожа", "сыпь", "зуд", "лишай", "прыщи", "акне", "дерматолог"],
+    "ревматолог": ["сустав", "суставы", "артрит", "артроз", "колени", "ревматолог"],
+    "отоларинголог": ["ухо", "горло", "нос", "отит", "гайморит", "ангина", "лор"],
+    "уролог": ["мочеиспускание", "цистит", "почки", "простатит", "уролог"],
+    "психиатр": ["депрессия", "тревога", "паническая", "психика", "галлюцинации", "психиатр", "психотерапевт"],
+    "диетолог": ["вес", "диета", "похудеть", "ожирение", "питание", "диетолог"]
 }
 
 # Загрузка локальных баз данных
@@ -61,6 +151,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CLINICS_PATH = os.path.join(BASE_DIR, "data", "clinics.json")
 FIRST_AID_PATH = os.path.join(BASE_DIR, "data", "first_aid.json")
 DISEASES_INDEX_PATH = os.path.join(BASE_DIR, "data", "diseases_index.json")
+PROFESSIONS_INDEX_PATH = os.path.join(BASE_DIR, "data", "professions_index.json")
 
 CLINICS_DB = []
 FIRST_AID_DB = []
@@ -84,11 +175,21 @@ DISEASES_INDEX = None
 try:
     if os.path.exists(DISEASES_INDEX_PATH):
         DISEASES_INDEX = SimpleTFIDFIndex.load(DISEASES_INDEX_PATH)
-        print("RAG база знаний успешно загружена.")
+        print("RAG база знаний заболеваний успешно загружена.")
     else:
-        print("Внимание: RAG база знаний не найдена.")
+        print("Внимание: RAG база знаний заболеваний не найдена.")
 except Exception as e:
-    print(f"Ошибка загрузки RAG базы знаний: {e}")
+    print(f"Ошибка загрузки RAG базы знаний заболеваний: {e}")
+
+PROFESSIONS_INDEX = None
+try:
+    if os.path.exists(PROFESSIONS_INDEX_PATH):
+        PROFESSIONS_INDEX = SimpleTFIDFIndex.load(PROFESSIONS_INDEX_PATH)
+        print("RAG база знаний профессий успешно загружена.")
+    else:
+        print("Внимание: RAG база знаний профессий не найдена.")
+except Exception as e:
+    print(f"Ошибка загрузки RAG базы знаний профессий: {e}")
 
 # Запускаем фоновый апдейтер только если мы НЕ на Vercel и НЕ на PythonAnywhere
 if "VERCEL" not in os.environ and "PYTHONANYWHERE_DOMAIN" not in os.environ:
@@ -100,8 +201,8 @@ if "VERCEL" not in os.environ and "PYTHONANYWHERE_DOMAIN" not in os.environ:
 
 # Системные промпты с профессиональным, успокаивающим тоном и строгими ограничениями
 SYSTEM_PROMPT = (
-    "Ты — Санарип, высококвалифицированный, хладнокровный и надежный медицинский координатор. "
-    "Твоя главная миссия — спасти жизнь человека при любых обстоятельствах, предотвратить ухудшение его состояния и направить к нужному специалисту.\n\n"
+    "Ты З Санарип, высококвалифицированный, хладнокровный и надежный медицинский координатор. "
+    "Твоя главная миссия З спасти жизнь человека при любых обстоятельствах, предотвратить ухудшение его состояния и направить к нужному специалисту.\n\n"
     "СТРОГИЕ КЛИНИЧЕСКИЕ ПРАВИЛА (ЖИЗНЕННО ВАЖНО):\n"
     "1. ДВУХЭТАПНЫЙ ОПРОС ПАЦИЕНТА (ОБЯЗАТЕЛЬНО):\n"
     "   - ЭТАП 1: Когда пациент впервые сообщает о жалобе или новом симптоме (например: 'я обжегся', 'болит живот'), ты НЕ должен сразу выдавать полный диагноз или рекомендации первой помощи. Вместо этого ты должен СНАЧАЛА задать один (максимум два) коротких и точечных уточняющих вопроса, чтобы сузить круг симптомов, и обязательно предложить в конце кнопки с вариантами ответов.\n"
@@ -115,17 +216,18 @@ SYSTEM_PROMPT = (
     "- Будь лаконичным. Пиши максимально кратко, убирай лишние рассуждения, пустые вежливые фразы и 'воду'. Текст должен быть легко читаемым в одно мгновение.\n"
     "- Разделяй смысловые блоки горизонтальными линиями из символов: `────────────────`.\n"
     "- Разнообразь текст тематическими иконками-эмодзи перед пунктами или важными предупреждениями (например: 🩹, ⚠️, 🌡️, 💊, ❌, ✅, ℹ️, 🚨, 🚑).\n"
-    "- В конце сообщения добавляй кнопки строго в формате: [Кнопки: Вариант 1 | Вариант 2]"
+    "- В конце сообщения добавляй кнопки строго в формате: [Кнопки: Вариант 1 | Вариант 2]. ВАЖНО: Названия кнопок делай максимально короткими (1-3 слова, до 20 символов), чтобы они полностью помещались на экране телефона и не обрезались.\n\n"
+    "ОБРАБОТКА ОФФТОПИКА:\n"
+    "Если запрос пользователя вообще не относится к медицине, здоровью или первой помощи, ты должен вежливо попросить его больше не обращаться к боту с такими темами. В этом случае ОБЯЗАТЕЛЬНО добавь в самом начале ответа тег [OFFTOPIC].\n\n"
+    "ЯЗЫКОВОЕ ПРАВИЛО (КРИТИЧЕСКИ ВАЖНО):\n"
+    "Обязательно определяй язык, на котором к тебе обращается пациент (русский, кыргызский и т.д.), и ВСЕГДА отвечай строго на том же языке. Все уточняющие вопросы, рекомендации и названия кнопок должны быть переведены на язык пользователя."
 )
 
 VISION_PROMPT = (
-    "Ты — Санарип, квалифицированный медицинский координатор визуальной диагностики.\n\n"
+    "Ты З Санарип, квалифицированный медицинский координатор визуальной диагностики.\n\n"
     "СТРОГИЕ ПРАВИЛА АНАЛИЗА ИЗОБРАЖЕНИЙ (ДВУХЭТАПНЫЙ ПРОЦЕСС):\n"
     "1. ЭТАП 1: Когда пациент только отправляет фотографию симптома/травмы, ты НЕ должен писать полный отчет, диагноз или рекомендации первой помощи. "
     "Вместо этого ты должен СНАЧАЛА кратко (в 1 предложении) описать, что видишь на снимке, и сразу задать 1 главный уточняющий вопрос, чтобы определить происхождение или тяжесть симптома, обязательно прикрепив в самом конце варианты ответов в виде кнопок.\n"
-    "Пример ответа на первом этапе:\n"
-    "Вижу на фотографии покраснение кожи на руке. Подскажите, пожалуйста, чем именно был вызван этот ожог?\n"
-    "[Кнопки: Горячая вода или пар | Горячий предмет | Открытый огонь | Химическое вещество]\n\n"
     "2. ЭТАП 2: Только после того, как пациент выберет вариант (это будет видно в истории диалога как ответ на твой уточняющий вопрос), ты проводишь полный клинический анализ и выдаешь структурированную информацию, разделяя разделы линиями и используя иконки:\n"
     "   ℹ️ Визуальные признаки: (кратко)\n"
     "   ────────────────\n"
@@ -138,7 +240,12 @@ VISION_PROMPT = (
     "   И добавляешь кнопку записи к врачу: `[Кнопки: Записаться на врача поблизости]`\n\n"
     "ПРАВИЛА ОФОРМЛЕНИЯ:\n"
     "- Пиши кратко, емко, без лишних пояснений.\n"
-    "- Разделяй смысловые блоки линиями `────────────────`."
+    "- Разделяй смысловые блоки линиями `────────────────`.\n"
+    "- Названия предлагаемых кнопок делай максимально короткими (1-3 слова, до 20 символов), чтобы они полностью помещались на экране телефона и не обрезались.\n\n"
+    "ОБРАБОТКА ОФФТОПИКА:\n"
+    "Если изображение или вопрос не относится к медицине, здоровью, травмам или симптомам болезней, напиши только одно слово: [OFFTOPIC].\n\n"
+    "ЯЗЫКОВОЕ ПРАВИЛО (КРИТИЧЕСКИ ВАЖНО):\n"
+    "Обязательно определяй язык, на котором к тебе обращается пациент (русский, кыргызский и т.д.), и ВСЕГДА отвечай строго на том же языке. Все уточняющие вопросы, рекомендации и названия кнопок должны быть переведены на язык пользователя."
 )
 
 
@@ -253,13 +360,12 @@ def ask_deepseek_with_history(chat_id: int, user_message: str, context: str = ""
 
     # Проводим RAG поиск по локальной базе заболеваний
     rag_context = ""
+    history = USER_SESSIONS.get(chat_id, [])
+    user_msgs = [m["content"] for m in history if m["role"] == "user"]
+    search_query = " ".join(user_msgs[-3:]) if user_msgs else user_message
+
     if DISEASES_INDEX:
         try:
-            # Объединяем последние 3 сообщения пользователя для сохранения медицинского контекста
-            history = USER_SESSIONS.get(chat_id, [])
-            user_msgs = [m["content"] for m in history if m["role"] == "user"]
-            search_query = " ".join(user_msgs[-3:]) if user_msgs else user_message
-            
             results = DISEASES_INDEX.search(search_query, top_k=2)
             matching_docs = []
             for doc, score in results:
@@ -272,14 +378,33 @@ def ask_deepseek_with_history(chat_id: int, user_message: str, context: str = ""
             if matching_docs:
                 rag_context = "=== ЛОКАЛЬНЫЕ КЛИНИЧЕСКИЕ ПРОТОКОЛЫ (RAG) ===\n\n" + "\n\n---\n\n".join(matching_docs)
         except Exception as e:
-            print(f"Ошибка RAG поиска: {e}")
-            
-    # Объединяем контекст ключевых слов и RAG
+            print(f"Ошибка RAG поиска заболеваний: {e}")
+
+    # Проводим RAG поиск по локальной базе медицинских профессий
+    prof_context = ""
+    if PROFESSIONS_INDEX:
+        try:
+            results = PROFESSIONS_INDEX.search(search_query, top_k=2)
+            matching_docs = []
+            for doc, score in results:
+                if score > 0.05:
+                    matching_docs.append(
+                        f"Профессиональный профиль: {doc['title']}\n"
+                        f"Содержание:\n{doc['content']}"
+                    )
+            if matching_docs:
+                prof_context = "=== СПРАВКА ПО МЕДИЦИНСКИМ ПРОФЕССИЯМ (RAG) ===\n\n" + "\n\n---\n\n".join(matching_docs)
+        except Exception as e:
+            print(f"Ошибка RAG поиска профессий: {e}")
+
+    # Объединяем контекст ключевых слов, RAG по заболеваниям и RAG по профессиям
     full_context = ""
     if context:
         full_context += context + "\n\n"
     if rag_context:
-        full_context += rag_context
+        full_context += rag_context + "\n\n"
+    if prof_context:
+        full_context += prof_context
 
     # Собираем payload для API
     headers = {
@@ -317,9 +442,20 @@ def ask_deepseek_with_history(chat_id: int, user_message: str, context: str = ""
         # Добавляем ответ ассистента в историю диалога
         USER_SESSIONS[chat_id].append({"role": "assistant", "content": raw_reply})
         save_chat_history(chat_id)
+        
+        # Обработка тега [OFFTOPIC]
+        reply = raw_reply
+        if "[OFFTOPIC]" in reply:
+            reply = reply.replace("[OFFTOPIC]", "").strip()
+            USER_OFFTOPIC_COUNT[chat_id] = USER_OFFTOPIC_COUNT.get(chat_id, 0) + 1
+            if USER_OFFTOPIC_COUNT[chat_id] > 2:
+                USER_BLOCKED.add(chat_id)
+                return "Извините, но вы были заблокированы за многократные вопросы не по теме.", None
+            if not reply:
+                reply = "Пожалуйста, прошу вас уважительно больше не обращаться ко мне на темы, не связанные с медицинской помощью."
 
         # Парсинг кнопок из ответа ИИ
-        clean_text, markup = parse_dynamic_buttons(raw_reply)
+        clean_text, markup = parse_dynamic_buttons(reply)
         return clean_text, markup
 
     except Exception as e:
@@ -416,7 +552,7 @@ def summarize_symptoms_with_llm(chat_id) -> str:
     }
     
     messages = [
-        {"role": "system", "content": "Ты — медицинский координатор. Проанализируй историю диалога и кратко (одной фразой до 10-12 слов) сформулируй жалобы и симптомы пациента для бригады скорой помощи. Пиши строго по делу (например: 'Термический ожог кисти руки горячей водой, острая боль'). Избегай приветствий и вежливых слов."},
+        {"role": "system", "content": "Ты З медицинский координатор. Проанализируй историю диалога и кратко (одной фразой до 10-12 слов) сформулируй жалобы и симптомы пациента для бригады скорой помощи. Пиши строго по делу (например: 'Термический ожог кисти руки горячей водой, острая боль'). Избегай приветствий и вежливых слов."},
     ]
     # Фильтруем сообщения, исключая технические сообщения о выборе кнопок
     filtered_history = [
@@ -490,7 +626,7 @@ def save_emergency_request(chat_id, state_data):
     if os.path.exists(file_path):
         try:
             with open(file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+                json.load(f)
         except Exception as e:
             print(f"Ошибка чтения заявок: {e}")
             
@@ -582,13 +718,32 @@ def analyze_image_with_groq(image_bytes: bytes) -> str:
         resp = requests.post(GROQ_URL, json=payload, headers=headers, timeout=30)
         if resp.status_code != 200:
             print(f"Ошибка от Groq API: {resp.status_code} {resp.text}")
-            return "Не удалось распознать изображение. Пожалуйста, попробуйте еще раз."
+            return "Не удалось распознать изображение. Пожалуйста, сделайте новую фотографию, желательно при хорошем освещении и более четко."
         data = resp.json()
         return data["choices"][0]["message"]["content"]
     except Exception as e:
         print(f"Ошибка Groq Vision: {e}")
-        return "Произошла ошибка при анализе изображения."
+        return "Извините, произошла ошибка. Пожалуйста, сделайте новую фотографию, но более четкую и при хорошем освещении."
 
+def is_offtopic_text(text: str) -> bool:
+    if not text.strip():
+        return False
+    prompt = f"Ответь только ДА или НЕТ. Относится ли этот текст к медицине, здоровью, травмам или симптомам болезней? Текст: '{text}'"
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.0,
+        "max_tokens": 10
+    }
+    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
+    try:
+        resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=10)
+        ans = resp.json()["choices"][0]["message"]["content"].strip().lower()
+        if "нет" in ans or "no" in ans:
+            return True
+    except:
+        pass
+    return False
 
 # --- Обработчики Callback-запросов (Inline кнопки) ---
 
@@ -596,6 +751,10 @@ def analyze_image_with_groq(image_bytes: bytes) -> str:
 def handle_callback(call):
     """Обрабатывает нажатия на inline кнопки"""
     chat_id = call.message.chat.id
+
+    if chat_id in USER_BLOCKED:
+        bot.answer_callback_query(call.id, "Диалог остановлен. Вы заблокированы за оффтоп.")
+        return
 
     # 1. Запросы первой помощи
     if call.data.startswith("aid_"):
@@ -612,7 +771,8 @@ def handle_callback(call):
             bot.answer_callback_query(call.id, "Загружаю...")
             context, _ = get_relevant_context(key)
             reply, markup = ask_deepseek_with_history(chat_id, f"Напиши инструкцию первой помощи при теме: '{key}'", context)
-            bot.send_message(chat_id, reply, reply_markup=markup, parse_mode='Markdown')
+            if reply is not None:
+                bot.send_message(chat_id, reply, reply_markup=markup, parse_mode='Markdown')
             
     # 2. Запросы клиник
     elif call.data.startswith("clinic_"):
@@ -621,7 +781,7 @@ def handle_callback(call):
             clinic = CLINICS_DB[index]
             bot.answer_callback_query(call.id, "Загружаю...")
             
-            doctors_info = "\n".join([f"👨‍⚕️ {doc['name']} — {doc['specialty']} ({doc['rating']})" for doc in clinic.get("doctors", [])])
+            doctors_info = "\n".join([f"👨‍⚕️ {doc['name']} З {doc['specialty']} ({doc['rating']})" for doc in clinic.get("doctors", [])])
             
             message_text = (
                 f"🏥 {clinic.get('name')}\n\n"
@@ -704,15 +864,23 @@ def handle_callback(call):
         bot.send_chat_action(chat_id, 'typing')
         context, _ = get_relevant_context(choice)
         reply, markup = ask_deepseek_with_history(chat_id, choice, context)
-        bot.send_message(chat_id, reply, reply_markup=markup, parse_mode='Markdown')
+        if reply is not None:
+            bot.send_message(chat_id, reply, reply_markup=markup, parse_mode='Markdown')
 # --- Командные обработчики ---
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     chat_id = message.chat.id
-    # Очищаем историю сессии при старте/сбросе
-    USER_SESSIONS[chat_id] = []
     
+    # Сброс сессии и блокировки при /start
+    USER_SESSIONS[chat_id] = []
+    if chat_id in USER_STATES:
+        del USER_STATES[chat_id]
+    if chat_id in USER_OFFTOPIC_COUNT:
+        del USER_OFFTOPIC_COUNT[chat_id]
+    if chat_id in USER_BLOCKED:
+        USER_BLOCKED.remove(chat_id)
+        
     welcome_text = (
         "Здравствуйте! 👋 Я медицинский координатор **Санарип**.\n\n"
         "Я помогу вам провести первичную оценку симптомов, дам рекомендации по первой помощи "
@@ -729,7 +897,10 @@ def send_welcome(message):
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
     chat_id = message.chat.id
-    text = message.text
+    text = message.text.strip()
+    
+    if chat_id in USER_BLOCKED:
+        return
 
     # Проверка, заполняет ли пользователь форму скорой помощи
     if chat_id in USER_STATES:
@@ -808,189 +979,76 @@ def handle_text(message):
     
     # Запрос к DeepSeek с учетом истории диалога
     reply, markup = ask_deepseek_with_history(chat_id, text, context)
-            
-    bot.reply_to(message, reply, reply_markup=markup, parse_mode='Markdown')
-
-
-# --- Геолокация ---
-
-@bot.message_handler(content_types=['location'])
-def handle_location(message):
-    chat_id = message.chat.id
-    if not message.location:
-        return
-    
-    lat = message.location.latitude
-    lon = message.location.longitude
-
-    # Проверка на режим регистрации вызова скорой
-    if chat_id in USER_STATES:
-        state_data = USER_STATES[chat_id]
-        if state_data.get("state") == "EMERGENCY_LOCATION":
-            state_data["location"] = f"Координаты: {lat:.6f}, {lon:.6f}"
-            
-            # Определяем район Бишкека автоматически по координатам
-            detected_district = get_bishkek_district_by_coords(lat, lon)
-            state_data["region"] = detected_district
-            state_data["state"] = "EMERGENCY_CONTACT"
-            
-            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-            markup.add(types.KeyboardButton("📱 Поделиться контактом", request_contact=True))
-            bot.send_message(
-                chat_id,
-                f"📍 Район определен автоматически: **{detected_district}**\n\nПожалуйста, **поделитесь номером телефона**, нажав на кнопку ниже 👇 (или отправьте его текстом):",
-                parse_mode="Markdown",
-                reply_markup=markup
-            )
-            return
-    
-    # 1. Определяем специализацию по истории диалога
-    specialty = detect_specialty(chat_id)
-    
-    # 2. Фильтруем и вычисляем расстояния
-    matched_clinics = []
-    for clinic in CLINICS_DB:
-        # Проверяем, есть ли нужная специализация (если удалось определить)
-        if specialty:
-            if specialty not in clinic.get("specializations", []):
-                continue
-                
-        c_lat = clinic.get("latitude")
-        c_lon = clinic.get("longitude")
-        if c_lat is not None and c_lon is not None:
-            dist = calculate_distance(lat, lon, c_lat, c_lon)
-            matched_clinics.append((clinic, dist))
-        else:
-            matched_clinics.append((clinic, 999999.0))
-            
-    # Сортируем по возрастанию расстояния
-    matched_clinics.sort(key=lambda x: x[1])
-    
-    if not matched_clinics:
-        bot.send_message(
-            chat_id, 
-            "К сожалению, в нашей базе нет клиник с подходящими врачами.", 
-            reply_markup=get_main_keyboard()
-        )
-        return
-        
-    response_lines = []
-    if specialty:
-        response_lines.append(f"🔍 Найдено ближайших врачей по специализации **{specialty}**:\n")
-    else:
-        response_lines.append("🔍 Вот ближайшие клиники к вам:\n")
-        
-    # Показываем топ-3 ближайших клиник
-    for clinic, dist in matched_clinics[:3]:
-        # Выбираем врачей нужной специализации
-        matching_docs = []
-        for doc in clinic.get("doctors", []):
-            if not specialty or specialty in doc.get("specialty", "").lower():
-                matching_docs.append(doc)
-                
-        docs_str = "\n".join([f"  👨‍⚕️ {doc['name']} ({doc['specialty']}) — {doc.get('rating', '')}" for doc in matching_docs])
-        if not docs_str:
-            docs_str = "  (Нет свободных врачей по выбранному направлению)"
-            
-        dist_str = f"{dist:.2f} км" if dist < 999999.0 else "расстояние неизвестно"
-        
-        response_lines.append(
-            f"🏥 **{clinic['name']}** (~{dist_str})\n"
-            f"📍 Адрес: {clinic['address']}\n"
-            f"📞 Тел: {clinic['phone']}\n"
-            f"🕒 Время работы: {clinic.get('working_hours', 'Не указано')}\n"
-            f"🩺 Врачи:\n{docs_str}\n"
-        )
-        
-    bot.send_message(chat_id, "\n".join(response_lines), parse_mode="Markdown", reply_markup=get_main_keyboard())
-
-
-# --- Фотографии ---
-
-@bot.message_handler(content_types=['photo'])
-def handle_photo(message):
-    chat_id = message.chat.id
-    bot.reply_to(message, "Фотография получена. Провожу анализ изображения, пожалуйста, подождите... ⏳")
-    
-    try:
-        photo_index = -2 if len(message.photo) > 1 else -1
-        file_info = bot.get_file(message.photo[photo_index].file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-        
-        analysis_result = analyze_image_with_groq(downloaded_file)
-        
-        # Парсим динамические кнопки из ответа модели
-        clean_text, markup = parse_dynamic_buttons(analysis_result)
-        
-        # Записываем событие отправки фото и его анализ в историю диалога
-        if chat_id not in USER_SESSIONS:
-            USER_SESSIONS[chat_id] = []
-        USER_SESSIONS[chat_id].append({"role": "user", "content": "[Отправлена фотография для анализа]"})
-        USER_SESSIONS[chat_id].append({"role": "assistant", "content": clean_text})
-        save_chat_history(chat_id)
-        
-        bot.reply_to(message, clean_text, reply_markup=markup, parse_mode='Markdown')
-        
-    except Exception as e:
-        print(f"Ошибка анализа фото: {e}")
-        bot.reply_to(message, "Произошла непредвиденная ошибка при разборе фотографии. Пожалуйста, попробуйте отправить изображение еще раз.")
-
-
-# --- Контакты ---
-
-@bot.message_handler(content_types=['contact'])
-def handle_contact(message):
-    chat_id = message.chat.id
-    if not message.contact:
-        return
-        
-    if chat_id in USER_STATES:
-        state_data = USER_STATES[chat_id]
-        if state_data.get("state") == "EMERGENCY_CONTACT":
-            phone = message.contact.phone_number
-            state_data["phone"] = phone
-            state_data["state"] = "EMERGENCY_NAME"
-            
-            bot.send_message(
-                chat_id,
-                "Спасибо! Пожалуйста, напишите ваше **Имя и Фамилию** для завершения вызова:",
-                parse_mode="Markdown",
-                reply_markup=types.ReplyKeyboardRemove()
-            )
-
+    if reply is not None:
+        bot.send_message(chat_id, reply, reply_markup=markup, parse_mode='Markdown')
 
 # --- Голосовые сообщения ---
 
+
+
 @bot.message_handler(content_types=['voice'])
+
 def handle_voice(message):
+
     chat_id = message.chat.id
+
     bot.reply_to(message, "Получил голосовое сообщение. Распознаю речь... 🎧")
+
     
+
     try:
+
         file_info = bot.get_file(message.voice.file_id)
+
         downloaded_file = bot.download_file(file_info.file_path)
+
         
+
         # Распознаем текст с помощью Groq Whisper (поддерживает кыргызский, русский и английский)
+
         transcribed_text = transcribe_voice_with_groq(downloaded_file)
+
         
+
         if not transcribed_text.strip():
+
             bot.reply_to(message, "Не удалось разобрать речь. Пожалуйста, попробуйте записать аудио четче или напишите текстом.")
+
             return
+
             
-        bot.reply_to(message, f"🗣️ **Распознанный текст:**\n*«{transcribed_text}»*", parse_mode="Markdown")
+
+        bot.reply_to(message, f"З️ **Распознанный текст:**\n*«{transcribed_text}»*", parse_mode="Markdown")
+
         
+
         # Имитируем отправку текстового ответа, подменяя text в объекте message
+
         message.text = transcribed_text
+
         handle_text(message)
+
             
+
     except Exception as e:
+
         print(f"Ошибка обработки голосового сообщения: {e}")
+
         bot.reply_to(message, "Произошла ошибка при обработке голосового сообщения.")
 
 
+
+
+
 if __name__ == "__main__":
+
     if bot:
+
         print("Telegram-бот Санарип успешно запущен и ожидает сообщений...")
+
         bot.infinity_polling()
+
     else:
+
         print("Критическая ошибка: Бот не запущен из-за отсутствия токена.")
+
