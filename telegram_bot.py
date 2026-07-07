@@ -1070,7 +1070,43 @@ def handle_voice(message):
         bot.reply_to(message, "Произошла ошибка при обработке голосового сообщения.")
 
 
+# --- Фотографии / Изображения ---
 
+@bot.message_handler(content_types=['photo'])
+def handle_photo(message):
+    chat_id = message.chat.id
+    if chat_id not in USER_ACCEPTED_DISCLAIMER:
+        send_disclaimer(chat_id)
+        return
+
+    bot.reply_to(message, "Получил изображение. Анализирую визуальные симптомы... 🔍")
+    bot.send_chat_action(chat_id, 'typing')
+
+    try:
+        photo = message.photo[-1]
+        file_info = bot.get_file(photo.file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+
+        # Вызываем Vision API
+        analysis_result = analyze_image_with_groq(downloaded_file)
+
+        # Парсим кнопки
+        clean_text, markup = parse_dynamic_buttons(analysis_result)
+
+        # Сохраняем в историю
+        if chat_id not in USER_SESSIONS:
+            USER_SESSIONS[chat_id] = []
+
+        caption_text = f" (Подпись: '{message.caption}')" if message.caption else ""
+        USER_SESSIONS[chat_id].append({"role": "user", "content": f"[Отправлено фото]{caption_text}"})
+        USER_SESSIONS[chat_id].append({"role": "assistant", "content": analysis_result})
+        save_chat_history(chat_id)
+
+        bot.send_message(chat_id, clean_text, reply_markup=markup, parse_mode='Markdown')
+
+    except Exception as e:
+        print(f"Ошибка обработки изображения: {e}")
+        bot.reply_to(message, "Извините, произошла ошибка при анализе изображения. Пожалуйста, попробуйте отправить фото еще раз.")
 
 
 if __name__ == "__main__":
