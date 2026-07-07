@@ -126,6 +126,7 @@ USER_STATES = {}
 USER_OFFTOPIC_COUNT = {}
 USER_BLOCKED = set()
 USER_ACCEPTED_DISCLAIMER = set()
+USER_TOKEN_USAGE = {}
 
 # Глобальный словарь соответствия симптомов специальностям врачей
 SPECIALTY_KEYWORDS = {
@@ -440,6 +441,15 @@ def ask_deepseek_with_history(chat_id: int, user_message: str, context: str = ""
         data = resp.json()
         raw_reply = data["choices"][0]["message"]["content"]
 
+        # Обновляем статистику токенов
+        usage = data.get("usage", {})
+        if usage:
+            if chat_id not in USER_TOKEN_USAGE:
+                USER_TOKEN_USAGE[chat_id] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            USER_TOKEN_USAGE[chat_id]["prompt_tokens"] += usage.get("prompt_tokens", 0)
+            USER_TOKEN_USAGE[chat_id]["completion_tokens"] += usage.get("completion_tokens", 0)
+            USER_TOKEN_USAGE[chat_id]["total_tokens"] += usage.get("total_tokens", 0)
+
         # Добавляем ответ ассистента в историю диалога
         USER_SESSIONS[chat_id].append({"role": "assistant", "content": raw_reply})
         save_chat_history(chat_id)
@@ -602,7 +612,8 @@ def save_chat_history(chat_id):
                 "chat_id": chat_id,
                 "name": name,
                 "history": history,
-                "last_updated": time.strftime("%Y-%m-%d %H:%M:%S")
+                "last_updated": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "usage_stats": USER_TOKEN_USAGE.get(chat_id, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
             }, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"Ошибка сохранения истории чата {chat_id}: {e}")

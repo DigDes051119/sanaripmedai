@@ -1,6 +1,6 @@
 import os
 import requests
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, redirect
 from dotenv import load_dotenv
 
 # Загружаем переменные окружения
@@ -190,6 +190,21 @@ def dashboard():
                 color: #dc2626;
                 font-size: 0.9rem;
             }
+
+            .reset-btn {
+                background: #ef4444;
+                color: white;
+                border: none;
+                padding: 0.6rem 1.4rem;
+                border-radius: 4px;
+                font-weight: 600;
+                font-size: 0.9rem;
+                cursor: pointer;
+                transition: background 0.2s;
+            }
+            .reset-btn:hover {
+                background: #dc2626;
+            }
             
             .dashboard-grid {
                 display: grid;
@@ -349,7 +364,12 @@ def dashboard():
         <div class="container">
             <header>
                 <h1><i data-lucide="alert-triangle"></i> Панель Заявок Скорой Помощи</h1>
-                <div class="stats-badge">Активных вызовов: {{ total_count }}</div>
+                <div style="display: flex; gap: 1rem; align-items: center;">
+                    <div class="stats-badge">Активных вызовов: {{ total_count }}</div>
+                    <form action="/reset_emergency" method="POST" style="margin: 0;" onsubmit="return confirm('Вы действительно хотите очистить всю историю заявок скорой помощи?');">
+                        <button type="submit" class="reset-btn" style="display: flex; align-items: center; gap: 0.5rem;"><i data-lucide="trash-2" style="width: 16px; height: 16px;"></i> Сбросить историю</button>
+                    </form>
+                </div>
             </header>
             
             <div class="dashboard-grid">
@@ -417,6 +437,19 @@ def developer_panel():
             try:
                 with open(file, "r", encoding="utf-8") as f:
                     chat_data = json.load(f)
+                    
+                    usage = chat_data.get("usage_stats", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+                    prompt_tokens = usage.get("prompt_tokens", 0)
+                    completion_tokens = usage.get("completion_tokens", 0)
+                    total_tokens = usage.get("total_tokens", 0)
+                    
+                    # Тариф: $0.27 за 1M prompt, $1.10 за 1M completion
+                    cost = (prompt_tokens * 0.00000027) + (completion_tokens * 0.0000011)
+                    
+                    chat_data["usage"] = usage
+                    chat_data["cost"] = f"{cost:.6f}"
+                    chat_data["cost_per_1k"] = f"{(cost / max(1, total_tokens) * 1000):.6f}"
+                    
                     chats.append(chat_data)
             except Exception as e:
                 print(f"Error reading chat file {file}: {e}")
@@ -503,6 +536,21 @@ def developer_panel():
             .nav-btn:hover {
                 background: #e5e7eb;
                 color: var(--text-primary);
+            }
+
+            .reset-btn {
+                background: #ef4444;
+                color: white;
+                border: none;
+                padding: 0.6rem 1.2rem;
+                border-radius: 4px;
+                font-weight: 600;
+                font-size: 0.875rem;
+                cursor: pointer;
+                transition: background 0.2s;
+            }
+            .reset-btn:hover {
+                background: #dc2626;
             }
             
             .main-container {
@@ -698,7 +746,12 @@ def developer_panel():
     <body>
         <header>
             <h1><i data-lucide="terminal"></i> Панель разработчика: Диалоги пациентов</h1>
-            <a href="/dashboard" class="nav-btn"><i data-lucide="activity"></i> К заявкам скорой помощи</a>
+            <div style="display: flex; gap: 1rem; align-items: center;">
+                <form action="/reset_chats" method="POST" style="margin: 0;" onsubmit="return confirm('Вы действительно хотите удалить все диалоги пациентов?');">
+                    <button type="submit" class="reset-btn" style="display: flex; align-items: center; gap: 0.5rem;"><i data-lucide="trash-2" style="width: 16px; height: 16px;"></i> Сбросить историю диалогов</button>
+                </form>
+                <a href="/dashboard" class="nav-btn"><i data-lucide="activity"></i> К заявкам скорой помощи</a>
+            </div>
         </header>
         
         <div class="main-container">
@@ -713,7 +766,7 @@ def developer_panel():
                             <span class="chat-item-name">{{ c.name or 'Пациент' }}</span>
                             <span class="chat-item-time">{{ c.last_updated.split(' ')[1] }}</span>
                         </div>
-                        <div class="chat-item-id">ID: {{ c.chat_id }}</div>
+                        <div class="chat-item-id">ID: {{ c.chat_id }} | {{ c.usage.total_tokens }} токенов (${{ c.cost }})</div>
                     </a>
                     {% endfor %}
                 {% endif %}
@@ -721,9 +774,21 @@ def developer_panel():
             
             <div class="chat-window">
                 {% if selected_chat %}
-                    <div class="chat-header-info">
-                        <div class="chat-header-name">{{ selected_chat.name or 'Пациент' }}</div>
-                        <div class="chat-header-meta">Chat ID: {{ selected_chat.chat_id }} | Обновлено: {{ selected_chat.last_updated }}</div>
+                    <div class="chat-header-info" style="display: flex; justify-content: space-between; align-items: flex-start;">
+                        <div>
+                            <div class="chat-header-name">{{ selected_chat.name or 'Пациент' }}</div>
+                            <div class="chat-header-meta">Chat ID: {{ selected_chat.chat_id }} | Обновлено: {{ selected_chat.last_updated }}</div>
+                        </div>
+                        <div style="background: #f3f4f6; padding: 0.75rem 1rem; border-radius: 6px; font-size: 0.85rem; border: 1px solid #e5e7eb; min-width: 320px; box-shadow: inset 0 1px 2px rgba(0,0,0,0.03);">
+                            <div style="font-weight: 600; color: #111827; margin-bottom: 0.35rem; display: flex; align-items: center; gap: 0.35rem;"><i data-lucide="bar-chart-2" style="width: 16px; height: 16px; color: var(--accent-blue);"></i> Статистика токенов (DeepSeek)</div>
+                            <div style="color: var(--text-secondary); line-height: 1.4;">
+                                • Входящие: <strong>{{ selected_chat.usage.prompt_tokens }}</strong> токенов<br>
+                                • Исходящие: <strong>{{ selected_chat.usage.completion_tokens }}</strong> токенов<br>
+                                • Всего: <strong>{{ selected_chat.usage.total_tokens }}</strong> токенов<br>
+                                • Стоимость диалога: <strong style="color: #10b981;">${{ selected_chat.cost }}</strong><br>
+                                • Цена за 1К токенов: <strong style="color: var(--accent-blue);">${{ selected_chat.cost_per_1k }}</strong>
+                            </div>
+                        </div>
                     </div>
                     
                     <div class="messages-container">
@@ -755,6 +820,34 @@ def developer_panel():
     </html>
     """
     return render_template_string(template, chats=chats, selected_chat=selected_chat)
+
+@app.route("/reset_emergency", methods=["POST"])
+def reset_emergency():
+    import json
+    import os
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(BASE_DIR, "data", "emergency_requests.json")
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump({"requests": []}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Error resetting emergency requests: {e}")
+    return redirect("/dashboard")
+
+@app.route("/reset_chats", methods=["POST"])
+def reset_chats():
+    import os
+    import glob
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    histories_dir = os.path.join(BASE_DIR, "data", "chat_histories")
+    if os.path.exists(histories_dir):
+        files = glob.glob(os.path.join(histories_dir, "*.json"))
+        for file in files:
+            try:
+                os.remove(file)
+            except Exception as e:
+                print(f"Error deleting file {file}: {e}")
+    return redirect("/developer")
 
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
