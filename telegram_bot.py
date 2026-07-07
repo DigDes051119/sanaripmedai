@@ -125,6 +125,7 @@ USER_STATES = {}
 # Отслеживание оффтопика и блокировок
 USER_OFFTOPIC_COUNT = {}
 USER_BLOCKED = set()
+USER_ACCEPTED_DISCLAIMER = set()
 
 # Глобальный словарь соответствия симптомов специальностям врачей
 SPECIALTY_KEYWORDS = {
@@ -745,15 +746,24 @@ def is_offtopic_text(text: str) -> bool:
         pass
     return False
 
-# --- Обработчики Callback-запросов (Inline кнопки) ---
-
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
-    """Обрабатывает нажатия на inline кнопки"""
     chat_id = call.message.chat.id
-
     if chat_id in USER_BLOCKED:
         bot.answer_callback_query(call.id, "Диалог остановлен. Вы заблокированы за оффтоп.")
+        return
+
+    if call.data == "accept_disclaimer":
+        USER_ACCEPTED_DISCLAIMER.add(chat_id)
+        bot.answer_callback_query(call.id, "Спасибо за подтверждение!")
+        bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
+        instructions = (
+            "Спасибо! Соглашение принято, теперь я готов помочь вам. 👍\n\n"
+            "✍️ **Вы можете описать ваши жалобы текстом** (например: 'болит ухо' или 'укусила собака') "
+            "или **прислать фотографию** травмы/симптома.\n\n"
+            "👇 Также вы можете воспользоваться кнопками быстрого выбора ниже:"
+        )
+        bot.send_message(chat_id, instructions, reply_markup=get_main_keyboard(), parse_mode='Markdown')
         return
 
     # 1. Запросы первой помощи
@@ -866,14 +876,26 @@ def handle_callback(call):
         reply, markup = ask_deepseek_with_history(chat_id, choice, context)
         if reply is not None:
             bot.send_message(chat_id, reply, reply_markup=markup, parse_mode='Markdown')
+def send_disclaimer(chat_id):
+    disclaimer_text = (
+        "⚖️ **Важная информация перед началом**\n\n"
+        "Санарип — это ИИ-помощник для первичной оценки симптомов и поиска врачей. Бот не ставит окончательные диагнозы, не назначает лечение и не заменяет очную консультацию врача.\n\n"
+        "Нажимая кнопку ниже, вы соглашаетесь с тем, что бот носит исключительно справочный характер, и вы берете на себя полную ответственность за любые свои дальнейшие действия и решения, связанные со здоровьем."
+    )
+    markup = types.InlineKeyboardMarkup()
+    btn = types.InlineKeyboardButton("Я согласен(на)", callback_data="accept_disclaimer")
+    markup.add(btn)
+    bot.send_message(chat_id, disclaimer_text, reply_markup=markup, parse_mode='Markdown')
+
 # --- Командные обработчики ---
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     chat_id = message.chat.id
     
-    # Сброс сессии и блокировки при /start
+    # Сброс сессии, соглашения и блокировок при /start
     USER_SESSIONS[chat_id] = []
+    USER_ACCEPTED_DISCLAIMER.discard(chat_id)
     if chat_id in USER_STATES:
         del USER_STATES[chat_id]
     if chat_id in USER_OFFTOPIC_COUNT:
@@ -881,24 +903,22 @@ def send_welcome(message):
     if chat_id in USER_BLOCKED:
         USER_BLOCKED.remove(chat_id)
         
-    welcome_text = (
-        "Здравствуйте! 👋 Я медицинский координатор **Санарип**.\n\n"
-        "Я помогу вам провести первичную оценку симптомов, дам рекомендации по первой помощи "
-        "и подскажу контакты клиник в Бишкеке.\n\n"
-        "✍️ **Вы можете описать ваши жалобы текстом** (например: 'болит ухо' или 'укусила собака') "
-        "или **прислать фотографию** травмы/симптома.\n\n"
-        "👇 Также вы можете воспользоваться кнопками быстрого выбора ниже:"
-    )
-    bot.reply_to(message, welcome_text, reply_markup=get_main_keyboard(), parse_mode='Markdown')
+    welcome_text = "Здравствуйте! 👋 Я медицинский координатор **Санарип**."
+    bot.send_message(chat_id, welcome_text, parse_mode='Markdown')
+    
+    # Отправляем дисклеймер
+    send_disclaimer(chat_id)
 
-
-# --- Текстовые сообщения ---
 
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
     chat_id = message.chat.id
     text = message.text.strip()
     
+    if chat_id not in USER_ACCEPTED_DISCLAIMER:
+        send_disclaimer(chat_id)
+        return
+        
     if chat_id in USER_BLOCKED:
         return
 
@@ -989,8 +1009,10 @@ def handle_text(message):
 @bot.message_handler(content_types=['voice'])
 
 def handle_voice(message):
-
     chat_id = message.chat.id
+    if chat_id not in USER_ACCEPTED_DISCLAIMER:
+        send_disclaimer(chat_id)
+        return
 
     bot.reply_to(message, "Получил голосовое сообщение. Распознаю речь... 🎧")
 
