@@ -851,11 +851,23 @@ def handle_callback(call):
         # Симулируем отправку сообщения пользователем в чат, отображая его выбор
         bot.send_message(chat_id, f"👉 Выбрано: {choice}")
         
-        if choice.startswith("Записаться на врача поблизости"):
+        if choice.startswith("Записаться") or "записаться к" in choice.lower() or "записаться на" in choice.lower():
+            specialty = None
+            for key in SPECIALTY_KEYWORDS.keys():
+                if key[:-1] in choice.lower():
+                    specialty = key
+                    break
+            if not specialty:
+                specialty = detect_specialty(chat_id)
+                
+            USER_STATES[chat_id] = {
+                "state": "SEARCH_CLINICS_LOCATION",
+                "specialty": specialty
+            }
             markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-            btn = types.KeyboardButton("📍 Поделиться геолокацией", request_location=True)
+            btn = types.KeyboardButton("📍 Отправить геолокацию", request_location=True)
             markup.add(btn)
-            bot.send_message(chat_id, "Пожалуйста, поделитесь вашим местоположением (нажав на кнопку ниже), чтобы я мог подобрать ближайших врачей для вашей ситуации: 👇", reply_markup=markup)
+            bot.send_message(chat_id, "Пожалуйста, поделитесь вашим местоположением (нажав на кнопку ниже 👇), чтобы я мог подобрать ближайшие клиники с нужным специалистом для вашей ситуации:", reply_markup=markup)
             return
 
         if choice.startswith("Вызвать скорую помощь"):
@@ -1106,7 +1118,89 @@ def handle_photo(message):
 
     except Exception as e:
         print(f"Ошибка обработки изображения: {e}")
-        bot.reply_to(message, "Извините, произошла ошибка при анализе изображения. Пожалуйста, попробуйте отправить фото еще раз.")
+
+def find_nearest_clinics(lat, lon, specialty=None, top_k=3):
+    import math
+    results = []
+    for clinic in CLINICS_DB:
+        if specialty:
+            specializations = [s.lower() for s in clinic.get("specializations", [])]
+            doc_specialties = [d.get("specialty", "").lower() for d in clinic.get("doctors", [])]
+            if specialty.lower() not in specializations and not any(specialty.lower() in ds for ds in doc_specialties):
+                continue
+                
+        clat = clinic.get("latitude")
+        clon = clinic.get("longitude")
+        if clat is None or clon is None:
+            continue
+            
+        R = 6371.0
+        dlat = math.radians(clat - lat)
+        dlon = math.radians(clon - lon)
+        a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat)) * math.cos(math.radians(clat)) * math.sin(dlon / 2)**2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        distance = R * c
+        
+        results.append((clinic, distance))
+        
+    results.sort(key=lambda x: x[1])
+    return results[:top_k]
+
+# --- Геолокация ---
+
+@bot.message_handler(content_types=['location'])
+def handle_location(message):
+    chat_id = message.chat.id
+    if chat_id not in USER_ACCEPTED_DISCLAIMER:
+        send_disclaimer(chat_id)
+        return
+
+    lat = message.location.latitude
+    lon = message.location.longitude
+
+    state_data = USER_STATES.get(chat_id, {})
+    current_state = state_data.get("state")
+
+    if current_state == "EMERGENCY_LOCATION":
+        region = get_bishkek_district_by_coords(lat, lon)
+        state_data["location"] = f"Координаты: {lat}, {lon}"
+        state_data["region"] = region
+        state_data["state"] = "EMERGENCY_NAME"
+        
+        bot.send_message(
+            chat_id,
+            f"📍 Координаты получены. Район города: **{region}**.\n\nПожалуйста, напишите ваше **Имя и Фамилию** для завершения вызова:",
+            parse_mode="Markdown",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+
+    # Поиск клиник
+    specialty = state_data.get("specialty") if current_state == "SEARCH_CLINICS_LOCATION" else detect_specialty(chat_id)
+    USER_STATES.pop(chat_id, None)
+
+    bot.reply_to(message, "Ищу ближайшие клиники... 🗺️")
+    
+    nearest = find_nearest_clinics(lat, lon, specialty=specialty, top_k=3)
+    if not nearest and specialty:
+        nearest = find_nearest_clinics(lat, lon, specialty=None, top_k=3)
+
+    if not nearest:
+        bot.send_message(chat_id, "Извините, не удалось найти клиники рядом с вами.", reply_markup=get_main_keyboard())
+        return
+
+    response = "📍 **Ближайшие клиники для вашей ситуации:**\n\n"
+    for clinic, dist in nearest:
+        response += (
+            f"🏥 **{clinic.get('name')}** (в {dist:.2f} км от вас)\n"
+            f"📍 Адрес: {clinic.get('address')}\n"
+            f"📞 Тел: {clinic.get('phone')}\n"
+            f"🕒 Время работы: {clinic.get('working_hours')}\n"
+            f"🩺 Направления: {', '.join(clinic.get('specializations', [])[:5])}...\n\n"
+        )
+    
+    response += "Вы можете связаться с клиникой напрямую для записи. 👍"
+    bot.send_message(chat_id, response, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 
 if __name__ == "__main__":
