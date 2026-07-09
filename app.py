@@ -8,7 +8,7 @@ load_dotenv()
 
 # Импортируем бота для работы через вебхуки на Vercel
 import telebot
-from telegram_bot import bot
+from telegram_bot import bot, send_message_safe
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
@@ -85,6 +85,7 @@ def home():
     <h1>Sanarip Med AI Webhook Server is running!</h1>
     <ul>
         <li><a href="/dashboard">🚑 Dashboard (Заявки скорой помощи)</a></li>
+        <li><a href="/clinic_dashboard">🏥 Clinic & Lab Dashboard (Запись к врачам / анализы)</a></li>
         <li><a href="/developer">🛠️ Developer Panel (Диалоги с ИИ)</a></li>
     </ul>
     """
@@ -932,6 +933,589 @@ def set_webhook():
         return f"Webhook successfully set to: {webhook_url}", 200
     else:
         return f"Failed to set webhook to: {webhook_url}", 500
+
+
+@app.route("/clinic_dashboard", methods=["GET"])
+def clinic_dashboard():
+    import json
+    import os
+    
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    
+    # 1. Загружаем список всех клиник и лабораторий
+    clinics_file = os.path.join(BASE_DIR, "data", "clinics.json")
+    clinics_list = []
+    if os.path.exists(clinics_file):
+        try:
+            with open(clinics_file, "r", encoding="utf-8") as f:
+                clinics_list = json.load(f).get("clinics", [])
+        except Exception as e:
+            print(f"Error reading clinics: {e}")
+            
+    # Получаем выбранную клинику из query-параметра (по умолчанию - первая в списке)
+    active_clinic_id = request.args.get("clinic_id")
+    if not active_clinic_id and clinics_list:
+        active_clinic_id = clinics_list[0].get("id")
+        
+    active_clinic = next((c for c in clinics_list if c.get("id") == active_clinic_id), None)
+    
+    # 2. Загружаем все записи (appointments)
+    appointments_file = os.path.join(BASE_DIR, "data", "appointments.json")
+    appointments_list = []
+    if os.path.exists(appointments_file):
+        try:
+            with open(appointments_file, "r", encoding="utf-8") as f:
+                appointments_list = json.load(f).get("appointments", [])
+        except Exception as e:
+            print(f"Error reading appointments: {e}")
+            
+    # Фильтруем записи по выбранной клинике
+    clinic_appointments = [a for a in appointments_list if a.get("clinic_id") == active_clinic_id]
+    
+    pending_appointments = [a for a in clinic_appointments if a.get("status") == "pending"]
+    archived_appointments = [a for a in clinic_appointments if a.get("status") in ["accepted", "completed"]]
+    
+    template = """
+    <!DOCTYPE html>
+    <html lang="ru">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Личный кабинет клиники | Санарип Мед AI</title>
+        <style>
+            :root {
+                --bg-main: #0f172a;
+                --bg-card: #1e293b;
+                --bg-input: #334155;
+                --text-main: #f8fafc;
+                --text-muted: #94a3b8;
+                --accent-primary: #0ea5e9;
+                --accent-success: #10b981;
+                --accent-warning: #f59e0b;
+                --accent-danger: #ef4444;
+            }
+            
+            * {
+                box-sizing: border-box;
+                margin: 0;
+                padding: 0;
+            }
+            
+            body {
+                font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+                background-color: var(--bg-main);
+                color: var(--text-main);
+                padding: 2rem;
+                min-height: 100vh;
+            }
+            
+            .container {
+                max-width: 1400px;
+                margin: 0 auto;
+            }
+            
+            header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 2rem;
+                border-bottom: 1px solid #334155;
+                padding-bottom: 1.5rem;
+                flex-wrap: wrap;
+                gap: 1.5rem;
+            }
+            
+            h1 {
+                font-size: 1.8rem;
+                font-weight: 700;
+                color: #f1f5f9;
+                display: flex;
+                align-items: center;
+                gap: 0.75rem;
+            }
+            
+            .header-controls {
+                display: flex;
+                align-items: center;
+                gap: 1rem;
+            }
+            
+            select {
+                background-color: var(--bg-card);
+                color: var(--text-main);
+                border: 1px solid var(--bg-input);
+                padding: 0.75rem 1.5rem;
+                border-radius: 8px;
+                font-size: 1rem;
+                font-weight: 600;
+                cursor: pointer;
+                outline: none;
+                transition: border 0.2s;
+            }
+            
+            select:hover {
+                border-color: var(--accent-primary);
+            }
+            
+            .clinic-details {
+                background-color: var(--bg-card);
+                border: 1px solid #334155;
+                border-radius: 12px;
+                padding: 1.5rem;
+                margin-bottom: 2rem;
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+                gap: 1.5rem;
+            }
+            
+            .detail-item {
+                display: flex;
+                flex-direction: column;
+                gap: 0.25rem;
+            }
+            
+            .detail-item span.label {
+                font-size: 0.85rem;
+                color: var(--text-muted);
+                text-transform: uppercase;
+                letter-spacing: 0.05em;
+            }
+            
+            .detail-item span.value {
+                font-size: 1.1rem;
+                font-weight: 600;
+            }
+            
+            .dashboard-grid {
+                display: grid;
+                grid-template-columns: 1fr;
+                gap: 2rem;
+            }
+            
+            @media (min-width: 992px) {
+                .dashboard-grid {
+                    grid-template-columns: 2fr 1fr;
+                }
+            }
+            
+            .panel {
+                background-color: var(--bg-card);
+                border: 1px solid #334155;
+                border-radius: 12px;
+                padding: 1.5rem;
+            }
+            
+            .panel-title {
+                font-size: 1.3rem;
+                font-weight: 700;
+                margin-bottom: 1.5rem;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                border-bottom: 1px solid #334155;
+                padding-bottom: 0.75rem;
+            }
+            
+            .badge-count {
+                background-color: var(--bg-input);
+                color: var(--text-main);
+                padding: 0.25rem 0.75rem;
+                border-radius: 20px;
+                font-size: 0.85rem;
+            }
+            
+            .appointments-list {
+                display: flex;
+                flex-direction: column;
+                gap: 1.25rem;
+            }
+            
+            .appointment-card {
+                background-color: var(--bg-main);
+                border: 1px solid #334155;
+                border-radius: 8px;
+                padding: 1.25rem;
+                position: relative;
+                transition: transform 0.2s, border-color 0.2s;
+            }
+            
+            .appointment-card:hover {
+                border-color: var(--accent-primary);
+            }
+            
+            .card-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: flex-start;
+                margin-bottom: 1rem;
+                gap: 1rem;
+            }
+            
+            .patient-name {
+                font-size: 1.2rem;
+                font-weight: 700;
+                color: #fff;
+            }
+            
+            .priority-badge {
+                font-size: 0.75rem;
+                font-weight: 700;
+                padding: 0.35rem 0.75rem;
+                border-radius: 4px;
+                text-transform: uppercase;
+            }
+            
+            .priority-high {
+                background-color: rgba(239, 68, 68, 0.2);
+                color: var(--accent-danger);
+                border: 1px solid var(--accent-danger);
+            }
+            
+            .priority-medium {
+                background-color: rgba(245, 158, 11, 0.2);
+                color: var(--accent-warning);
+                border: 1px solid var(--accent-warning);
+            }
+            
+            .priority-low {
+                background-color: rgba(16, 185, 129, 0.2);
+                color: var(--accent-success);
+                border: 1px solid var(--accent-success);
+            }
+            
+            .card-body {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 1rem;
+                margin-bottom: 1.25rem;
+            }
+            
+            .info-block {
+                display: flex;
+                flex-direction: column;
+                gap: 0.25rem;
+            }
+            
+            .info-block label {
+                font-size: 0.8rem;
+                color: var(--text-muted);
+            }
+            
+            .info-block p {
+                font-size: 0.95rem;
+            }
+            
+            .action-area {
+                display: flex;
+                gap: 1rem;
+                flex-direction: column;
+                border-top: 1px dashed #334155;
+                padding-top: 1rem;
+            }
+            
+            .form-inline {
+                display: grid;
+                grid-template-columns: 1fr 1fr auto;
+                gap: 1rem;
+                align-items: end;
+                width: 100%;
+            }
+            
+            @media (max-width: 768px) {
+                .form-inline {
+                    grid-template-columns: 1fr;
+                }
+            }
+            
+            .form-group {
+                display: flex;
+                flex-direction: column;
+                gap: 0.35rem;
+            }
+            
+            .form-group label {
+                font-size: 0.8rem;
+                color: var(--text-muted);
+            }
+            
+            input[type="text"], input[type="datetime-local"] {
+                background-color: var(--bg-input);
+                color: var(--text-main);
+                border: 1px solid #475569;
+                border-radius: 6px;
+                padding: 0.6rem 1rem;
+                font-size: 0.95rem;
+                outline: none;
+                transition: border 0.2s;
+            }
+            
+            input[type="text"]:focus, input[type="datetime-local"]:focus {
+                border-color: var(--accent-primary);
+            }
+            
+            button {
+                background-color: var(--accent-success);
+                color: #fff;
+                font-weight: 700;
+                border: none;
+                border-radius: 6px;
+                padding: 0.6rem 1.5rem;
+                cursor: pointer;
+                transition: background 0.2s;
+                font-size: 0.95rem;
+                height: max-content;
+            }
+            
+            button:hover {
+                background-color: #059669;
+            }
+            
+            .empty-state {
+                text-align: center;
+                padding: 3rem;
+                color: var(--text-muted);
+                font-style: italic;
+            }
+            
+            .archived-card {
+                border-left: 4px solid var(--accent-success);
+            }
+            
+            .archived-info {
+                display: flex;
+                gap: 1.5rem;
+                background-color: rgba(16, 185, 129, 0.05);
+                padding: 0.75rem 1rem;
+                border-radius: 6px;
+                border: 1px solid rgba(16, 185, 129, 0.2);
+            }
+        </style>
+        <script>
+            function switchClinic(clinicId) {
+                window.location.href = "/clinic_dashboard?clinic_id=" + clinicId;
+            }
+        </script>
+    </head>
+    <body>
+        <div class="container">
+            <header>
+                <h1>🏥 Личный кабинет партнера</h1>
+                <div class="header-controls">
+                    <select onchange="switchClinic(this.value)">
+                        {% for c in clinics %}
+                        <option value="{{ c.id }}" {% if c.id == active_clinic.id %}selected{% endif %}>
+                            {{ c.name }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </header>
+            
+            {% if active_clinic %}
+            <div class="clinic-details">
+                <div class="detail-item">
+                    <span class="label">Адрес клиники/лаборатории</span>
+                    <span class="value">📍 {{ active_clinic.address }}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="label">Контакты регистратуры</span>
+                    <span class="value">📞 {{ active_clinic.phone }}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="label">График работы</span>
+                    <span class="value">🕒 {{ active_clinic.working_hours }}</span>
+                </div>
+            </div>
+            {% endif %}
+            
+            <div class="dashboard-grid">
+                <!-- Панель активных заявок -->
+                <div class="panel">
+                    <div class="panel-title">
+                        Новые заявки на прием
+                        <span class="badge-count">{{ pending_appointments|length }}</span>
+                    </div>
+                    
+                    <div class="appointments-list">
+                        {% if pending_appointments %}
+                            {% for appt in pending_appointments %}
+                            <div class="appointment-card">
+                                <div class="card-header">
+                                    <span class="patient-name">{{ appt.patient_name }}</span>
+                                    <span class="priority-badge priority-{{ appt.priority|lower }}">{{ appt.priority }} приоритет</span>
+                                </div>
+                                <div class="card-body">
+                                    <div class="info-block">
+                                        <label>Телефон для связи</label>
+                                        <p><a href="tel:{{ appt.phone }}" style="color: var(--accent-primary); text-decoration: none; font-weight: 700;">{{ appt.phone }}</a></p>
+                                    </div>
+                                    <div class="info-block">
+                                        <label>Требуемый специалист/Анализ</label>
+                                        <p style="font-weight: 700;">{{ appt.specialty|capitalize }}</p>
+                                    </div>
+                                    <div class="info-block">
+                                        <label>Время создания заявки</label>
+                                        <p>{{ appt.timestamp }}</p>
+                                    </div>
+                                </div>
+                                <div class="info-block" style="margin-bottom: 1.25rem;">
+                                    <label>Обобщенные симптомы пациента (ИИ)</label>
+                                    <p style="background: rgba(255,255,255,0.05); padding: 0.75rem; border-radius: 6px; border: 1px solid #334155; line-height: 1.4;">{{ appt.symptoms }}</p>
+                                </div>
+                                
+                                <div class="action-area">
+                                    <form action="/clinic_dashboard/accept" method="POST" class="form-inline">
+                                        <input type="hidden" name="appointment_id" value="{{ appt.id }}">
+                                        <input type="hidden" name="clinic_id" value="{{ appt.clinic_id }}">
+                                        <div class="form-group">
+                                            <label>ФИО Врача / Название теста</label>
+                                            <input type="text" name="doctor_fio" required placeholder="Например: д-р Маматов А.Б.">
+                                        </div>
+                                        <div class="form-group">
+                                            <label>Дата и время приема</label>
+                                            <input type="datetime-local" name="appointment_time" required>
+                                        </div>
+                                        <button type="submit">Принять заявку и отправить пациенту</button>
+                                    </form>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        {% else %}
+                            <div class="empty-state">Нет новых заявок на запись.</div>
+                        {% endif %}
+                    </div>
+                </div>
+                
+                <!-- Панель архива -->
+                <div class="panel">
+                    <div class="panel-title">
+                        Архив записей
+                        <span class="badge-count">{{ archived_appointments|length }}</span>
+                    </div>
+                    
+                    <div class="appointments-list">
+                        {% if archived_appointments %}
+                            {% for appt in archived_appointments %}
+                            <div class="appointment-card archived-card">
+                                <div class="card-header">
+                                    <span class="patient-name" style="font-size: 1.1rem;">{{ appt.patient_name }}</span>
+                                    <span class="priority-badge priority-low">Подтверждена</span>
+                                </div>
+                                <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.75rem;">
+                                    Специалист: <strong>{{ appt.specialty }}</strong> | Тел: {{ appt.phone }}
+                                </p>
+                                <div class="archived-info">
+                                    <div class="info-block">
+                                        <label>Врач / Тест</label>
+                                        <p style="font-size: 0.9rem; font-weight: 700; color: var(--accent-success);">{{ appt.doctor_fio }}</p>
+                                    </div>
+                                    <div class="info-block">
+                                        <label>Дата / Время</label>
+                                        <p style="font-size: 0.9rem; font-weight: 700;">{{ appt.appointment_time }}</p>
+                                    </div>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        {% else %}
+                            <div class="empty-state">Архив пуст.</div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    
+    # Используем render_template_string для рендеринга шаблона
+    from flask import render_template_string
+    return render_template_string(
+        template,
+        clinics=clinics_list,
+        active_clinic=active_clinic,
+        pending_appointments=pending_appointments,
+        archived_appointments=archived_appointments
+    )
+
+@app.route("/clinic_dashboard/accept", methods=["POST"])
+def accept_appointment():
+    import json
+    import os
+    from datetime import datetime
+    
+    appointment_id = request.form.get("appointment_id")
+    clinic_id = request.form.get("clinic_id")
+    doctor_fio = request.form.get("doctor_fio")
+    appointment_time_raw = request.form.get("appointment_time")
+    
+    # Форматируем дату и время в более читаемый вид
+    try:
+        dt = datetime.fromisoformat(appointment_time_raw)
+        appointment_time = dt.strftime("%d.%m.%Y в %H:%M")
+    except:
+        appointment_time = appointment_time_raw
+        
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    appointments_file = os.path.join(BASE_DIR, "data", "appointments.json")
+    clinics_file = os.path.join(BASE_DIR, "data", "clinics.json")
+    
+    # 1. Загружаем данные клиники
+    clinics_list = []
+    if os.path.exists(clinics_file):
+        try:
+            with open(clinics_file, "r", encoding="utf-8") as f:
+                clinics_list = json.load(f).get("clinics", [])
+        except:
+            pass
+            
+    clinic = next((c for c in clinics_list if c.get("id") == clinic_id), None)
+    clinic_name = clinic.get("name", "Клиника") if clinic else "Клиника"
+    clinic_address = clinic.get("address", "Бишкек") if clinic else "Бишкек"
+    clinic_phone = clinic.get("phone", "") if clinic else ""
+    
+    # 2. Обновляем статус записи
+    appointments_list = []
+    if os.path.exists(appointments_file):
+        try:
+            with open(appointments_file, "r", encoding="utf-8") as f:
+                appointments_list = json.load(f).get("appointments", [])
+        except:
+            pass
+            
+    target_appt = None
+    for appt in appointments_list:
+        if appt.get("id") == appointment_id:
+            appt["status"] = "accepted"
+            appt["doctor_fio"] = doctor_fio
+            appt["appointment_time"] = appointment_time
+            target_appt = appt
+            break
+            
+    if target_appt:
+        try:
+            with open(appointments_file, "w", encoding="utf-8") as f:
+                json.dump({"appointments": appointments_list}, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Error saving appointments: {e}")
+            
+        # 3. Отправляем уведомление пациенту в Telegram
+        chat_id = target_appt.get("chat_id")
+        if chat_id:
+            confirm_message = (
+                "🔔 **Ваша запись успешно подтверждена!**\n\n"
+                f"🏥 **Клиника/Лаборатория:** {clinic_name}\n"
+                f"👨‍⚕️ **Врач / Анализ:** {doctor_fio}\n"
+                f"📅 **Дата и время:** {appointment_time}\n"
+                f"📍 **Адрес:** {clinic_address}\n"
+                f"📞 **Контакты:** {clinic_phone}\n\n"
+                "Пожалуйста, приходите за 10-15 минут до назначенного времени. Будем ждать вас! 😊"
+            )
+            try:
+                send_message_safe(chat_id, confirm_message, parse_mode="Markdown")
+            except Exception as e:
+                print(f"Error sending Telegram confirmation: {e}")
+                
+    return redirect(f"/clinic_dashboard?clinic_id={clinic_id}")
 
 if __name__ == "__main__":
     # Запуск сервера

@@ -868,6 +868,80 @@ def save_home_doctor_request(chat_id, state_data):
     send_message_safe(chat_id, aid_reply, parse_mode="Markdown")
 
 
+def save_appointment_request(chat_id, state_data):
+    """Сохраняет новую запись к врачу или в лабораторию в appointments.json"""
+    import datetime
+    import uuid
+    
+    # Пытаемся обобщить симптомы с ИИ
+    symptoms = summarize_symptoms_with_llm(chat_id)
+    if symptoms == "Симптомы не описаны" and state_data.get("specialty") == "лаборатория":
+        symptoms = "Профилактический чекап / сдача анализов"
+        
+    # Определяем приоритет
+    priority = "Низкий"
+    symptoms_lower = symptoms.lower()
+    urgent_keywords = ["боль", "острая", "травма", "перелом", "сильная", "кровь", "температура", "задыхаюсь", "плохо"]
+    medium_keywords = ["кашель", "насморк", "болит", "дискомфорт", "сыпь", "слабость"]
+    
+    if any(k in symptoms_lower for k in urgent_keywords):
+        priority = "Высокий"
+    elif any(k in symptoms_lower for k in medium_keywords):
+        priority = "Средний"
+        
+    if state_data.get("specialty") == "лаборатория" and priority == "Высокий":
+        priority = "Средний"
+        
+    request_id = str(uuid.uuid4())[:8]
+    
+    appointment = {
+        "id": request_id,
+        "chat_id": chat_id,
+        "clinic_id": state_data.get("clinic_id"),
+        "clinic_name": state_data.get("clinic_name"),
+        "clinic_type": state_data.get("clinic_type", "clinic"),
+        "patient_name": state_data.get("patient_name"),
+        "phone": state_data.get("phone"),
+        "symptoms": symptoms,
+        "specialty": state_data.get("specialty", "терапевт"),
+        "priority": priority,
+        "status": "pending",
+        "doctor_fio": "",
+        "appointment_time": "",
+        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    
+    file_path = os.path.join(BASE_DIR, "data", "appointments.json")
+    db_data = {"appointments": []}
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                db_data = json.load(f)
+        except Exception as e:
+            print(f"Ошибка чтения базы записей: {e}")
+            
+    db_data.setdefault("appointments", []).append(appointment)
+    
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(db_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Ошибка сохранения записи: {e}")
+        
+    # Очищаем состояние
+    USER_STATES.pop(chat_id, None)
+    save_json_state(STATES_FILE, USER_STATES)
+    
+    # Отправляем подтверждение пациенту
+    wait_time = "в течение часа" if priority == "Высокий" else "в течение дня"
+    confirm_text = (
+        "✅ **Заявка на запись успешно отправлена!**\n\n"
+        f"Клиника/лаборатория **{appointment['clinic_name']}** свяжется с вами для подтверждения записи.\n"
+        f"Пожалуйста, ожидайте уведомления здесь в чате ({wait_time}). Мы сообщим вам ФИО врача, дату и точное время приёма."
+    )
+    send_message_safe(chat_id, confirm_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
+
+
 def transcribe_voice_with_groq(file_bytes: bytes) -> str:
     """Транскрибация аудио-файла голоса через Groq Whisper API (поддерживает кыргызский, русский и английский)"""
     if not GROQ_API_KEY or GROQ_API_KEY == "your_groq_api_key_here":
@@ -1018,6 +1092,10 @@ def _handle_callback_logic(call):
             clinic = CLINICS_DB[index]
             bot.answer_callback_query(call.id, "Загружаю...")
             
+            # Достаем сохраненную специальность из текущего состояния
+            state_data = USER_STATES.get(chat_id, {}) or USER_STATES.get(str(chat_id), {})
+            specialty = state_data.get("specialty") or detect_specialty(chat_id) or "терапевт"
+            
             doctors_list = []
             for doc in clinic.get("doctors", []):
                 rating = doc.get("rating")
@@ -1034,6 +1112,23 @@ def _handle_callback_logic(call):
                 f"🩺 **Врачи клиники:**\n{doctors_info}"
             )
             send_message_safe(chat_id, message_text, parse_mode="Markdown")
+            
+            # Переводим в состояние ввода имени для записи
+            USER_STATES[chat_id] = {
+                "state": "APPOINTMENT_NAME",
+                "clinic_id": clinic.get("id"),
+                "clinic_name": clinic.get("name"),
+                "clinic_type": "lab" if ("лаборатория" in clinic.get("specializations", []) or "анализы" in clinic.get("specializations", [])) else "clinic",
+                "specialty": specialty
+            }
+            save_json_state(STATES_FILE, USER_STATES)
+            
+            bot.send_message(
+                chat_id,
+                "✍️ Пожалуйста, напишите ваше **Имя и Фамилию** для оформления записи:",
+                parse_mode="Markdown",
+                reply_markup=types.ReplyKeyboardRemove()
+            )
         except Exception as e:
             print(f"Ошибка клиники по кнопке: {e}")
 
@@ -1377,6 +1472,27 @@ def handle_text(message):
             save_json_state(STATES_FILE, USER_STATES)
             return
 
+        # --- Запись на прием ---
+        elif current_state == "APPOINTMENT_NAME":
+            state_data["patient_name"] = text
+            state_data["state"] = "APPOINTMENT_CONTACT"
+            save_json_state(STATES_FILE, USER_STATES)
+            
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+            markup.add(types.KeyboardButton("📱 Поделиться контактом", request_contact=True))
+            bot.send_message(
+                chat_id,
+                "Пожалуйста, **поделитесь номером телефона**, нажав на кнопку ниже 👇 (или отправьте его текстом):",
+                parse_mode="Markdown",
+                reply_markup=markup
+            )
+            return
+
+        elif current_state == "APPOINTMENT_CONTACT":
+            state_data["phone"] = text
+            save_appointment_request(chat_id, state_data)
+            return
+
         # --- Вызов врача на дом ---
         elif current_state == "HOME_DOCTOR_LOCATION":
             state_data["location"] = text
@@ -1663,6 +1779,10 @@ def handle_contact(message):
                     parse_mode="Markdown",
                     reply_markup=types.ReplyKeyboardRemove()
                 )
+            elif current_state == "APPOINTMENT_CONTACT":
+                phone = message.contact.phone_number
+                state_data["phone"] = phone
+                save_appointment_request(chat_id, state_data)
     except Exception as e:
         print(f"Ошибка в handle_contact для chat_id {chat_id}: {e}")
         import traceback
@@ -1726,8 +1846,10 @@ def handle_location(message):
 
         # Поиск клиник
         specialty = state_data.get("specialty") if current_state == "SEARCH_CLINICS_LOCATION" else detect_specialty(chat_id)
-        USER_STATES.pop(chat_id, None)
-        USER_STATES.pop(str(chat_id), None)
+        USER_STATES[chat_id] = {
+            "state": "SELECTING_CLINIC",
+            "specialty": specialty or ""
+        }
         save_json_state(STATES_FILE, USER_STATES)
 
         bot.reply_to(message, "Ищу ближайшие клиники... 🗺️")
