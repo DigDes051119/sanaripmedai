@@ -259,8 +259,15 @@ SYSTEM_PROMPT = (
     "4. РАЗДЕЛЕНИЕ ЭТАПОВ РЕКОМЕНДАЦИЙ И ЗАПИСИ (КРИТИЧЕСКИ ВАЖНО):\n"
     "   - СЛУЧАЙ А (Симптомы не критические/не очень болезненные): Морально успокой пациента и дай базовые правила безопасности (что делать НЕЛЬЗЯ, например: не принимать горячую ванну, не пить таблетки без контроля). Категорически запрещено давать подробные пошаговые рекомендации до осмотра врача на этом этапе (например: прикладывать полотенце, делать массаж). Вместо этого в самом конце сообщения напиши вежливую фразу: «Если вас это беспокоит и ваше самочувствие ухудшается, то вам нужно обратиться к врачу.» и предложи кнопки:\n"
     "     [Кнопки: Нет, спасибо, мне лучше | Да, записаться к врачу]\n"
-    "   - СЛУЧАЙ Б (Симптомы средней тяжести / болезненные / выраженные): Дай пошаговые рекомендации. Ты ОБЯЗАН четко, явно и выделяя жирным шрифтом указать точное название специальности врача (например, **акушер-гинеколог**, **кардиолог**, **эндокринолог**), к которому пациенту следует обратиться для очной консультации. После этого предложи кнопку записи:\n"
-    "     [Кнопки: Записаться на врача поблизости]\n\n"
+    "   - СЛУЧАЙ Б (Симптомы средней тяжести / болезненные / выраженные): Дай пошаговые рекомендации. Ты ОБЯЗАН четко, явно и выделяя жирным шрифтом указать точное название специальности врача (например, **акушер-гинеколог**, **кардиолог**, **эндокринолог**), к которому пациенту следует обратиться для очной консультации. После этого предложи три кнопки действий:\n"
+    "     [Кнопки: Записаться к врачу | Вызвать врача на дом | Вызвать скорую помощь]\n"
+    "5. ОБРАБОТКА УТОЧНЯЮЩИХ И ГИПОТЕТИЧЕСКИХ ВОПРОСОВ (ВАЖНО):\n"
+    "   - Если пациент просто хочет уточнить вопрос или спрашивает о будущем («А что будет, если боль усилится?»), не пугай его сразу. Мягко и вежливо расскажи, что это за состояние и как оно ощущается. Успокой пациента, дав ему понять, что прямо сейчас всё хорошо и не стоит переживать. Напиши, что при ухудшении состояния он может воспользоваться услугами врачей. Предложи кнопки действий:\n"
+    "     [Кнопки: Записаться к врачу | Вызвать врача на дом | Вызвать скорую помощь]\n"
+    "6. РАЗЛИЧИЕ КНОПОК ДЕЙСТВИЙ:\n"
+    "   - «Записаться к врачу» — если пациент хочет спокойно прийти в клинику и удостовериться в своем здоровье.\n"
+    "   - «Вызвать врача на дом» — если пациенту нездоровится, тяжело идти, и нужен осмотр врача на дому в тот же день.\n"
+    "   - «Вызвать скорую помощь» — если пациенту критически плохо и требуется экстренная помощь.\n\n"
     "ПРАВИЛА ОФОРМЛЕНИЯ И ЧИТАЕМОСТИ (КРИТИЧЕСКИ ВАЖНО):\n"
     "- Будь лаконичным. Пиши максимально кратко, убирай лишние рассуждения, пустые вежливые фразы и 'воду'. Текст должен быть легко читаемым в одно мгновение.\n"
     "- Разделяй смысловые блоки горизонтальными линиями из символов: `────────────────`.\n"
@@ -744,6 +751,88 @@ def save_emergency_request(chat_id, state_data):
     send_message_safe(chat_id, aid_reply, parse_mode="Markdown")
 
 
+def save_home_doctor_request(chat_id, state_data):
+    """Сохраняет новую заявку вызова врача на дом в JSON файл и отправляет подтверждение"""
+    import datetime
+    
+    request_entry = {
+        "id": chat_id,
+        "name": state_data.get("name", "Не указано"),
+        "phone": state_data.get("phone", "Не указано"),
+        "region": state_data.get("region", "Не указано"),
+        "location": state_data.get("location", "Не указано"),
+        "symptoms": state_data.get("symptoms", "Не указано"),
+        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    
+    file_path = os.path.join(BASE_DIR, "data", "home_doctor_requests.json")
+    data = {"requests": []}
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            print(f"Ошибка чтения заявок врача на дом: {e}")
+            
+    data.setdefault("requests", []).append(request_entry)
+    
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Ошибка сохранения заявки врача на дом: {e}")
+        
+    USER_STATES.pop(chat_id, None)
+    
+    confirmation_text = (
+        "🏠 **Ваш вызов врача на дом успешно зарегистрирован!**\n\n"
+        "Мы передали следующую информацию дежурному врачу:\n"
+        f"👤 **Пациент:** {request_entry['name']}\n"
+        f"📞 **Телефон:** {request_entry['phone']}\n"
+        f"🏙️ **Район:** {request_entry['region']}\n"
+        f"📍 **Адрес:** {request_entry['location']}\n"
+        f"🩺 **Описанные симптомы:** {request_entry['symptoms']}\n\n"
+        "Врач свяжется с вами по указанному телефону для уточнения деталей визита. Пожалуйста, оставайтесь на связи."
+    )
+    send_message_safe(chat_id, confirmation_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
+
+    # Генерируем пошаговые рекомендации до прихода врача на дом
+    bot.send_chat_action(chat_id, 'typing')
+    
+    prompt_deepseek = (
+        f"Пользователь успешно оформил вызов врача на дом. Симптомы: '{request_entry['symptoms']}'. "
+        "Проанализируй историю диалога и напиши пошаговые рекомендации до прихода врача на дом "
+        "(что делать и чего делать категорически нельзя). "
+        "Пиши кратко, успокаивающе и по делу. В конце НЕ предлагай никаких текстовых кнопок и тегов [Кнопки: ...]."
+    )
+    
+    history = USER_SESSIONS.get(chat_id, [])
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": prompt_deepseek})
+    
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": messages,
+        "temperature": 0.4,
+    }
+    
+    try:
+        resp = requests_post_deepseek(payload, timeout=15)
+        aid_reply = resp.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        print(f"Ошибка генерации рекомендаций до прихода врача на дом: {e}")
+        aid_reply = (
+            "📋 **Рекомендации до прихода врача:**\n\n"
+            "1. Подготовьте паспорт или свидетельство о рождении пациента.\n"
+            "2. Обеспечьте удобное положение в постели, исключите физические нагрузки.\n"
+            "3. Регулярно проветривайте комнату.\n"
+            "❌ Не принимайте обезболивающие препараты до осмотра, если болит живот (это может затруднить диагностику)."
+        )
+        
+    send_message_safe(chat_id, aid_reply, parse_mode="Markdown")
+
+
 def transcribe_voice_with_groq(file_bytes: bytes) -> str:
     """Транскрибация аудио-файла голоса через Groq Whisper API (поддерживает кыргызский, русский и английский)"""
     if not GROQ_API_KEY or GROQ_API_KEY == "your_groq_api_key_here":
@@ -920,13 +1009,17 @@ def _handle_callback_logic(call):
         val = region_map.get(call.data)
         
         if chat_id in USER_STATES:
+            state_data = USER_STATES[chat_id]
+            is_emergency = state_data.get("state", "").startswith("EMERGENCY")
+            prefix = "EMERGENCY" if is_emergency else "HOME_DOCTOR"
+            
             if val == "Другой":
-                USER_STATES[chat_id]["state"] = "EMERGENCY_REGION_TEXT"
+                state_data["state"] = f"{prefix}_REGION_TEXT"
                 save_json_state(STATES_FILE, USER_STATES)
                 bot.send_message(chat_id, "Пожалуйста, введите название вашего района или региона вручную:")
             else:
-                USER_STATES[chat_id]["region"] = val
-                USER_STATES[chat_id]["state"] = "EMERGENCY_CONTACT"
+                state_data["region"] = val
+                state_data["state"] = f"{prefix}_CONTACT"
                 save_json_state(STATES_FILE, USER_STATES)
                 
                 markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
@@ -1022,6 +1115,28 @@ def _handle_callback_logic(call):
             send_message_safe(chat_id, reply, reply_markup=markup, parse_mode="Markdown")
             return
 
+        if "врача на дом" in choice.lower() or "врача надом" in choice.lower():
+            symptoms = summarize_symptoms_with_llm(chat_id)
+            USER_STATES[chat_id] = {
+                "state": "HOME_DOCTOR_LOCATION",
+                "name": "",
+                "region": "",
+                "location": "",
+                "symptoms": symptoms
+            }
+            save_json_state(STATES_FILE, USER_STATES)
+            
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+            markup.add(types.KeyboardButton("📍 Отправить геолокацию", request_location=True))
+            bot.send_message(
+                chat_id, 
+                "🏠 **Оформление вызова врача на дом**\n\n"
+                "Чтобы дежурный врач мог приехать к вам, пожалуйста, **отправьте вашу геолокацию** с помощью кнопки ниже 👇 или напишите ваш **точный адрес текстом**:", 
+                parse_mode="Markdown", 
+                reply_markup=markup
+            )
+            return
+
         if choice.startswith("Вызвать скорую помощь"):
             # Вызываем LLM-суммаризатор симптомов на основе истории диалога
             symptoms = summarize_symptoms_with_llm(chat_id)
@@ -1110,6 +1225,7 @@ def handle_text(message):
         state_data = USER_STATES[chat_id]
         current_state = state_data.get("state")
 
+        # --- Вызов скорой помощи ---
         if current_state == "EMERGENCY_LOCATION":
             state_data["location"] = text
             state_data["state"] = "EMERGENCY_REGION"
@@ -1132,6 +1248,21 @@ def handle_text(message):
 
         elif current_state == "EMERGENCY_REGION_TEXT":
             state_data["region"] = text
+            state_data["state"] = "EMERGENCY_CONTACT"
+            save_json_state(STATES_FILE, USER_STATES)
+            
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+            markup.add(types.KeyboardButton("📱 Поделиться контактом", request_contact=True))
+            bot.send_message(
+                chat_id,
+                "Пожалуйста, **поделитесь номером телефона**, нажав на кнопку ниже 👇 (или отправьте его текстом):",
+                parse_mode="Markdown",
+                reply_markup=markup
+            )
+            return
+
+        elif current_state == "EMERGENCY_CONTACT":
+            state_data["phone"] = text
             state_data["state"] = "EMERGENCY_NAME"
             save_json_state(STATES_FILE, USER_STATES)
             bot.send_message(
@@ -1144,8 +1275,61 @@ def handle_text(message):
 
         elif current_state == "EMERGENCY_NAME":
             state_data["name"] = text
-            # save_emergency_request will pop the state, we save it inside or after it
             save_emergency_request(chat_id, state_data)
+            save_json_state(STATES_FILE, USER_STATES)
+            return
+
+        # --- Вызов врача на дом ---
+        elif current_state == "HOME_DOCTOR_LOCATION":
+            state_data["location"] = text
+            state_data["state"] = "HOME_DOCTOR_REGION"
+            save_json_state(STATES_FILE, USER_STATES)
+            
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            markup.add(
+                types.InlineKeyboardButton("Ленинский", callback_data="region_lenin"),
+                types.InlineKeyboardButton("Октябрьский", callback_data="region_okt"),
+                types.InlineKeyboardButton("Первомайский", callback_data="region_perv"),
+                types.InlineKeyboardButton("Свердловский", callback_data="region_sverd"),
+                types.InlineKeyboardButton("Другой район / Регион", callback_data="region_other")
+            )
+            bot.send_message(
+                chat_id, 
+                "Координаты не получены. Укажите ваш район Бишкека вручную с помощью кнопок для вызова врача на дом:", 
+                reply_markup=markup
+            )
+            return
+
+        elif current_state == "HOME_DOCTOR_REGION_TEXT":
+            state_data["region"] = text
+            state_data["state"] = "HOME_DOCTOR_CONTACT"
+            save_json_state(STATES_FILE, USER_STATES)
+            
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+            markup.add(types.KeyboardButton("📱 Поделиться контактом", request_contact=True))
+            bot.send_message(
+                chat_id,
+                "Пожалуйста, **поделитесь номером телефона**, нажав на кнопку ниже 👇 (или отправьте его текстом):",
+                parse_mode="Markdown",
+                reply_markup=markup
+            )
+            return
+
+        elif current_state == "HOME_DOCTOR_CONTACT":
+            state_data["phone"] = text
+            state_data["state"] = "HOME_DOCTOR_NAME"
+            save_json_state(STATES_FILE, USER_STATES)
+            bot.send_message(
+                chat_id,
+                "Пожалуйста, напишите ваше **Имя и Фамилию** для оформления вызова врача на дом:",
+                parse_mode="Markdown",
+                reply_markup=types.ReplyKeyboardRemove()
+            )
+            return
+
+        elif current_state == "HOME_DOCTOR_NAME":
+            state_data["name"] = text
+            save_home_doctor_request(chat_id, state_data)
             save_json_state(STATES_FILE, USER_STATES)
             return
 
@@ -1310,6 +1494,42 @@ def find_nearest_clinics(lat, lon, specialty=None, top_k=3):
     results.sort(key=lambda x: x[1])
     return results[:top_k]
 
+# --- Контактные данные (номер телефона) ---
+
+@bot.message_handler(content_types=['contact'])
+def handle_contact(message):
+    chat_id = message.chat.id
+    try:
+        load_chat_history(chat_id)
+        
+        if chat_id not in USER_ACCEPTED_DISCLAIMER:
+            send_disclaimer(chat_id)
+            return
+            
+        if chat_id in USER_STATES:
+            state_data = USER_STATES[chat_id]
+            current_state = state_data.get("state")
+            
+            if current_state in ["EMERGENCY_CONTACT", "HOME_DOCTOR_CONTACT"]:
+                phone = message.contact.phone_number
+                state_data["phone"] = phone
+                prefix = "EMERGENCY" if "EMERGENCY" in current_state else "HOME_DOCTOR"
+                state_data["state"] = f"{prefix}_NAME"
+                save_json_state(STATES_FILE, USER_STATES)
+                
+                prompt_text = "Пожалуйста, напишите ваше **Имя и Фамилию** для завершения вызова:" if prefix == "EMERGENCY" else "Пожалуйста, напишите ваше **Имя и Фамилию** для оформления вызова врача на дом:"
+                bot.send_message(
+                    chat_id,
+                    prompt_text,
+                    parse_mode="Markdown",
+                    reply_markup=types.ReplyKeyboardRemove()
+                )
+    except Exception as e:
+        print(f"Ошибка в handle_contact для chat_id {chat_id}: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 # --- Геолокация ---
 
 @bot.message_handler(content_types=['location'])
@@ -1341,6 +1561,22 @@ def handle_location(message):
             bot.send_message(
                 chat_id,
                 f"📍 Координаты получены. Район города: **{region}**.\n\nПожалуйста, напишите ваше **Имя и Фамилию** для завершения вызова:",
+                parse_mode="Markdown",
+                reply_markup=types.ReplyKeyboardRemove()
+            )
+            return
+
+        elif current_state == "HOME_DOCTOR_LOCATION":
+            region = get_bishkek_district_by_coords(lat, lon)
+            state_data["location"] = f"Координаты: {lat}, {lon}"
+            state_data["region"] = region
+            state_data["state"] = "HOME_DOCTOR_NAME"
+            USER_STATES[chat_id] = state_data
+            save_json_state(STATES_FILE, USER_STATES)
+            
+            bot.send_message(
+                chat_id,
+                f"📍 Координаты получены. Район города: **{region}**.\n\nПожалуйста, напишите ваше **Имя и Фамилию** для оформления вызова врача на дом:",
                 parse_mode="Markdown",
                 reply_markup=types.ReplyKeyboardRemove()
             )
