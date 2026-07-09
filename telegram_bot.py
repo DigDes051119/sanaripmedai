@@ -999,7 +999,7 @@ def _handle_callback_logic(call):
                 f"🕒 **Часы работы:** {clinic.get('working_hours')}\n\n"
                 f"🩺 **Врачи клиники:**\n{doctors_info}"
             )
-            bot.send_message(chat_id, message_text)
+            send_message_safe(chat_id, message_text, parse_mode="Markdown")
         except Exception as e:
             print(f"Ошибка клиники по кнопке: {e}")
 
@@ -1066,16 +1066,12 @@ def _handle_callback_logic(call):
             # Строим сообщение для отправки геолокации
             if specialty:
                 prompt_msg = (
-                    "Вам необходимо обратиться к врачу для очного осмотра.\n"
-                    f"Рекомендуемая специальность: **{specialty}**.\n\n"
-                    "────────────────\n"
-                    "🗺️ Пожалуйста, **поделитесь вашим местоположением** (нажав на кнопку ниже 👇), чтобы я мог подобрать ближайшие клиники с этим специалистом:"
+                    f"🩺 Рекомендуемый специалист: **{specialty}**.\n\n"
+                    "🗺️ Чтобы подобрать ближайшие партнерские клиники с этим врачом, пожалуйста, **поделитесь вашим местоположением** (нажав на кнопку ниже 👇):"
                 )
             else:
                 prompt_msg = (
-                    "Вам необходимо обратиться к врачу для очного осмотра.\n\n"
-                    "────────────────\n"
-                    "🗺️ Пожалуйста, **поделитесь вашим местоположением** (нажав на кнопку ниже 👇), чтобы я мог подобрать ближайшие клиники:"
+                    "🗺️ Чтобы подобрать ближайшие партнерские клиники, пожалуйста, **поделитесь вашим местоположением** (нажав на кнопку ниже 👇):"
                 )
                 
             markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
@@ -1683,7 +1679,7 @@ def handle_location(message):
                 clinic_idx = CLINICS_DB.index(clinic)
             except ValueError:
                 continue
-            btn_text = f"🏥 {clinic.get('name')} ({dist:.2f} км)"
+            btn_text = f"🏥 {clinic.get('short_name', clinic.get('name'))} ({dist:.2f} км)"
             markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"clinic_{clinic_idx}"))
             
         response = (
