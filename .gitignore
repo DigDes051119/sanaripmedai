@@ -6,3 +6,8 @@ data/chat_histories/
 data/emergency_requests.json
 data/diseases_index.json
 data/diseases_kb/
+data/user_states.json
+data/user_accepted_disclaimer.json
+data/user_offtopic_count.json
+data/user_blocked.json
+

@@ -1,80 +1,4 @@
 import os
-
-import json
-
-import base64
-
-import math
-
-import requests
-
-import telebot
-
-from telebot import types
-
-from dotenv import load_dotenv
-
-from rag_updater import SimpleTFIDFIndex, start_background_updater
-
-
-
-# Загружаем переменные окружения
-
-load_dotenv()
-
-
-
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-
-
-# Проверка токена при запуске
-
-token_missing = not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "your_telegram_bot_token_here" or ":" not in TELEGRAM_BOT_TOKEN
-
-
-
-if token_missing:
-
-    print("\n[!] ОШИБКА: TELEGRAM_BOT_TOKEN не настроен.")
-
-    if __name__ == "__main__":
-
-        import sys
-
-        sys.exit(1)
-
-    else:
-
-        # Для работы в Flask / Vercel не валим весь сервер при импорте, а создаем заглушку
-
-        bot = telebot.TeleBot("123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ", threaded=False)
-
-else:
-
-    # Инициализируем бота
-
-    bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, threaded=False)
-
-
-
-# URLs для API
-
-DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
-
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-
-
-
-# Конфигурация моделей
-
-DEEPSEEK_MODEL = "deepseek-chat"
-
-import os
 import json
 import base64
 import math
@@ -114,19 +38,136 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 DEEPSEEK_MODEL = "deepseek-chat"
 GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
+# Определение путей и базовой директории
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Пути к файлам персистентного хранения состояний
+STATES_FILE = os.path.join(BASE_DIR, "data", "user_states.json")
+DISCLAIMER_FILE = os.path.join(BASE_DIR, "data", "user_accepted_disclaimer.json")
+OFFTOPIC_FILE = os.path.join(BASE_DIR, "data", "user_offtopic_count.json")
+BLOCKED_FILE = os.path.join(BASE_DIR, "data", "user_blocked.json")
+
+def load_json_state(file_path, default):
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Ошибка загрузки состояния из {file_path}: {e}")
+    return default
+
+def save_json_state(file_path, data):
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Ошибка сохранения состояния в {file_path}: {e}")
+
 # Хранилище контекста диалогов (история сообщений для каждого пользователя)
-# Структура: { chat_id: [{"role": "user/assistant", "content": "..."}] }
 USER_SESSIONS = {}
 
-# Состояния заполнения формы скорой помощи
-# Структура: { chat_id: {"state": "...", "name": "...", "region": "...", "location": "...", "symptoms": "..."} }
-USER_STATES = {}
+# Состояния заполнения форм
+# Загружаем из файла для персистентности на Vercel/перезапусках
+_raw_states = load_json_state(STATES_FILE, {})
+USER_STATES = {int(k) if k.isdigit() else k: v for k, v in _raw_states.items()}
 
 # Отслеживание оффтопика и блокировок
-USER_OFFTOPIC_COUNT = {}
-USER_BLOCKED = set()
-USER_ACCEPTED_DISCLAIMER = set()
+_raw_offtopic = load_json_state(OFFTOPIC_FILE, {})
+USER_OFFTOPIC_COUNT = {int(k) if k.isdigit() else k: v for k, v in _raw_offtopic.items()}
+
+USER_BLOCKED = set(load_json_state(BLOCKED_FILE, []))
+USER_ACCEPTED_DISCLAIMER = set(load_json_state(DISCLAIMER_FILE, []))
 USER_TOKEN_USAGE = {}
+
+def load_chat_history(chat_id):
+    """Загружает историю диалога с диска, если она еще не загружена в память"""
+    if chat_id in USER_SESSIONS:
+        return USER_SESSIONS[chat_id]
+    
+    file_path = os.path.join(BASE_DIR, "data", "chat_histories", f"{chat_id}.json")
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                USER_SESSIONS[chat_id] = data.get("history", [])
+                if "usage_stats" in data:
+                    USER_TOKEN_USAGE[chat_id] = data["usage_stats"]
+                return USER_SESSIONS[chat_id]
+        except Exception as e:
+            print(f"Ошибка загрузки истории чата для {chat_id}: {e}")
+    
+    USER_SESSIONS[chat_id] = []
+    return USER_SESSIONS[chat_id]
+
+def send_message_safe(chat_id, text, reply_markup=None, parse_mode='Markdown'):
+    """Отправляет сообщение, при ошибке парсинга Markdown пробует отправить как обычный текст"""
+    try:
+        return bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except telebot.apihelper.ApiTelegramException as e:
+        if "bad request" in str(e).lower() and parse_mode == 'Markdown':
+            print(f"Markdown parsing failed, retrying in plain text for chat {chat_id}: {e}")
+            try:
+                # Очищаем от некоторых явных нестыковок и пробуем повторно как обычный текст
+                return bot.send_message(chat_id, text, reply_markup=reply_markup)
+            except Exception as e2:
+                print(f"Fallback send_message failed: {e2}")
+        else:
+            print(f"ApiTelegramException in send_message_safe: {e}")
+    except Exception as e:
+        print(f"General exception in send_message_safe: {e}")
+
+def reply_to_safe(message, text, reply_markup=None, parse_mode='Markdown'):
+    """Отвечает на сообщение, при ошибке парсинга Markdown пробует ответить как обычный текст"""
+    try:
+        return bot.reply_to(message, text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except telebot.apihelper.ApiTelegramException as e:
+        if "bad request" in str(e).lower() and parse_mode == 'Markdown':
+            print(f"Markdown parsing failed, retrying in plain text for reply: {e}")
+            try:
+                return bot.reply_to(message, text, reply_markup=reply_markup)
+            except Exception as e2:
+                print(f"Fallback reply_to failed: {e2}")
+        else:
+            print(f"ApiTelegramException in reply_to_safe: {e}")
+    except Exception as e:
+        print(f"General exception in reply_to_safe: {e}")
+
+
+
+def requests_post_deepseek(payload, timeout=15):
+    """Отправляет POST-запрос к DeepSeek API с поддержкой резервного API-ключа при сбоях или таймаутах"""
+    keys = [
+        os.getenv("DEEPSEEK_API_KEY"),
+        os.getenv("DEEPSEEK_API_KEY_SECONDARY")
+    ]
+    # Фильтруем пустые и дефолтные ключи
+    keys = [k for k in keys if k and k.strip() and k != "your_deepseek_api_key_here"]
+    
+    if not keys:
+        raise Exception("Отсутствуют API-ключи DeepSeek в конфигурации")
+        
+    last_err = None
+    for i, key in enumerate(keys):
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json"
+        }
+        try:
+            print(f"[DeepSeek] Попытка запроса с ключом #{i+1}...")
+            resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=timeout)
+            if resp.status_code == 200:
+                return resp
+            else:
+                last_err = f"HTTP {resp.status_code}: {resp.text}"
+                print(f"[DeepSeek] Ключ #{i+1} вернул ошибку: {last_err}")
+        except Exception as e:
+            last_err = str(e)
+            print(f"[DeepSeek] Ключ #{i+1} вызвал исключение: {last_err}")
+            
+    raise Exception(f"Все API-ключи DeepSeek вернули ошибку. Последняя ошибка: {last_err}")
+
 
 # Глобальный словарь соответствия симптомов специальностям врачей
 SPECIALTY_KEYWORDS = {
@@ -202,18 +243,24 @@ if "VERCEL" not in os.environ and "PYTHONANYWHERE_DOMAIN" not in os.environ:
 
 
 # Системные промпты с профессиональным, успокаивающим тоном и строгими ограничениями
+# Системные промпты с профессиональным, успокаивающим тоном и строгими ограничениями
 SYSTEM_PROMPT = (
-    "Ты З Санарип, высококвалифицированный, хладнокровный и надежный медицинский координатор. "
-    "Твоя главная миссия З спасти жизнь человека при любых обстоятельствах, предотвратить ухудшение его состояния и направить к нужному специалисту.\n\n"
+    "Ты — Санарип, высококвалифицированный, заботливый и надежный медицинский координатор. "
+    "Твоя главная миссия — спасти жизнь человека при любых обстоятельствах, предотвратить ухудшение его состояния и оказать психологическую поддержку.\n\n"
+    "ПРАВИЛО ПСИХОЛОГИЧЕСКОЙ ПОДДЕРЖКИ:\n"
+    "Всегда начинай свои рекомендации с вежливых, мягких и успокаивающих слов. Морально поддержи пациента, дай ему понять, что всё под контролем и он в безопасности (например: «Не волнуйтесь, пожалуйста, мы во всём разберемся», «Всё хорошо, главное — сохранять спокойствие, сейчас мы вам поможем»).\n\n"
     "СТРОГИЕ КЛИНИЧЕСКИЕ ПРАВИЛА (ЖИЗНЕННО ВАЖНО):\n"
     "1. ДВУХЭТАПНЫЙ ОПРОС ПАЦИЕНТА (ОБЯЗАТЕЛЬНО):\n"
     "   - ЭТАП 1: Когда пациент впервые сообщает о жалобе или новом симптоме (например: 'я обжегся', 'болит живот'), ты НЕ должен сразу выдавать полный диагноз или рекомендации первой помощи. Вместо этого ты должен СНАЧАЛА задать один (максимум два) коротких и точечных уточняющих вопроса, чтобы сузить круг симптомов, и обязательно предложить в конце кнопки с вариантами ответов.\n"
-    "   - ЭТАП 2: Только после того, как пациент выберет кнопку или ответит на твой уточняющий вопрос (это будет видно в истории диалога), ты переходишь к подробному анализу симптомов, выдаешь пошаговые рекомендации первой помощи на основе RAG-справки и предлагаешь кнопку записи к врачу.\n"
+    "   - ЭТАП 2: Только после того, как пациент выберет кнопку или ответит на твой уточняющий вопрос (это будет видно в истории диалога), ты переходишь к подробному анализу симптомов, выдаешь пошаговые рекомендации первой помощи на основе RAG-справки.\n"
     "2. МГНОВЕННОЕ РАСПОЗНАВАНИЕ УГРОЗЫ ЖИЗНИ: При любых намеках на критическое состояние (боль за грудиной, одышка, удушье, потеря сознания, анафилактический шок, обильное артериальное кровотечение, признаки инсульта FAST) твоей ПЕРВОЙ фразой должно быть требование СРОЧНО вызвать скорую помощь по номеру 103 и предложить кнопку:\n"
     "[Кнопки: Вызвать скорую помощь]\n"
     "3. ПРИНЦИП 'НЕ НАВРЕДИ': Строго запрещено рекомендовать рецептурные медикаменты. Предотвращай опасные действия (например, запрещай греть живот при болях, накладывать жгут без артериального кровотечения, мазать ожоги маслом).\n"
-    "4. СОПРОВОЖДЕНИЕ ПАЦИЕНТА И НАПРАВЛЕНИЕ К ВРАЧУ: Если ситуация средней тяжести, подробно объясни правила безопасности и пошаговые рекомендации до осмотра врача, основываясь на RAG-информации. Ты ОБЯЗАН четко, явно и выделяя жирным шрифтом указать точное название специальности врача (например, **акушер-гинеколог**, **кардиолог**, **эндокринолог**), к которому пациенту следует обратиться для очной консультации. Только после этого предлагай записаться:\n"
-    "[Кнопки: Записаться на врача поблизости]\n\n"
+    "4. РАЗДЕЛЕНИЕ ЭТАПОВ РЕКОМЕНДАЦИЙ И ЗАПИСИ (КРИТИЧЕСКИ ВАЖНО):\n"
+    "   - СЛУЧАЙ А (Симптомы не критические/не очень болезненные): Дай подробные пошаговые рекомендации до осмотра врача. НЕ рекомендуй сразу конкретного врача и не предлагай прямую кнопку записи. Вместо этого в самом конце сообщения напиши вежливую фразу: «Если вас это беспокоит и ваше самочувствие ухудшается, то вам нужно обратиться к врачу.» и предложи кнопки:\n"
+    "     [Кнопки: Нет, спасибо, мне лучше | Да, записаться к врачу]\n"
+    "   - СЛУЧАЙ Б (Симптомы средней тяжести / болезненные / выраженные): Дай пошаговые рекомендации. Ты ОБЯЗАН четко, явно и выделяя жирным шрифтом указать точное название специальности врача (например, **акушер-гинеколог**, **кардиолог**, **эндокринолог**), к которому пациенту следует обратиться для очной консультации. После этого предложи кнопку записи:\n"
+    "     [Кнопки: Записаться на врача поблизости]\n\n"
     "ПРАВИЛА ОФОРМЛЕНИЯ И ЧИТАЕМОСТИ (КРИТИЧЕСКИ ВАЖНО):\n"
     "- Будь лаконичным. Пиши максимально кратко, убирай лишние рассуждения, пустые вежливые фразы и 'воду'. Текст должен быть легко читаемым в одно мгновение.\n"
     "- Разделяй смысловые блоки горизонтальными линиями из символов: `────────────────`.\n"
@@ -224,6 +271,7 @@ SYSTEM_PROMPT = (
     "ЯЗЫКОВОЕ ПРАВИЛО (КРИТИЧЕСКИ ВАЖНО):\n"
     "Обязательно определяй язык, на котором к тебе обращается пациент (русский, кыргызский и т.д.), и ВСЕГДА отвечай строго на том же языке. Все уточняющие вопросы, рекомендации и названия кнопок должны быть переведены на язык пользователя."
 )
+
 
 VISION_PROMPT = (
     "Ты — Санарип, квалифицированный медицинский координатор визуальной диагностики.\n\n"
@@ -350,8 +398,7 @@ def ask_deepseek_with_history(chat_id: int, user_message: str, context: str = ""
         return "Ошибка конфигурации: отсутствует ключ DEEPSEEK_API_KEY.", None
 
     # Инициализируем историю сообщений, если сессии нет
-    if chat_id not in USER_SESSIONS:
-        USER_SESSIONS[chat_id] = []
+    load_chat_history(chat_id)
 
     # Добавляем сообщение пользователя в историю
     USER_SESSIONS[chat_id].append({"role": "user", "content": user_message})
@@ -434,10 +481,7 @@ def ask_deepseek_with_history(chat_id: int, user_message: str, context: str = ""
     }
     
     try:
-        resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=25)
-        if resp.status_code != 200:
-            return "Не удалось получить ответ от ИИ-ассистента. Пожалуйста, попробуйте еще раз.", None
-        
+        resp = requests_post_deepseek(payload, timeout=15)
         data = resp.json()
         raw_reply = data["choices"][0]["message"]["content"]
 
@@ -471,7 +515,7 @@ def ask_deepseek_with_history(chat_id: int, user_message: str, context: str = ""
 
     except Exception as e:
         print(f"Ошибка DeepSeek API: {e}")
-        return "Техническая задержка на стороне ИИ-модели. Пожалуйста, повторите запрос.", None
+        return "Для подготовки качественного и точного ответа нашему ИИ-ассистенту требуется чуть больше времени для анализа баз данных. Пожалуйста, отправьте ваше сообщение еще раз. 🩺", None
 
 
 def parse_dynamic_buttons(text: str) -> tuple:
@@ -491,7 +535,7 @@ def parse_dynamic_buttons(text: str) -> tuple:
     clean_text = re.sub(pattern, "", text).strip()
     
     # Строим клавиатуру
-    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup = types.InlineKeyboardMarkup(row_width=1)
     inline_buttons = []
     for opt in options:
         # В Telegram callback_data ограничена 64 байтами.
@@ -581,9 +625,8 @@ def summarize_symptoms_with_llm(chat_id) -> str:
     }
     
     try:
-        resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=15)
-        if resp.status_code == 200:
-            return resp.json()["choices"][0]["message"]["content"].strip()
+        resp = requests_post_deepseek(payload, timeout=15)
+        return resp.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
         print(f"Ошибка суммаризации симптомов: {e}")
         
@@ -749,7 +792,7 @@ def is_offtopic_text(text: str) -> bool:
     }
     headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
     try:
-        resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=10)
+        resp = requests_post_deepseek(payload, timeout=10)
         ans = resp.json()["choices"][0]["message"]["content"].strip().lower()
         if "нет" in ans or "no" in ans:
             return True
@@ -759,6 +802,18 @@ def is_offtopic_text(text: str) -> bool:
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
+    try:
+        _handle_callback_logic(call)
+    except Exception as e:
+        print(f"Ошибка в handle_callback: {e}")
+        import traceback
+        traceback.print_exc()
+        try:
+            bot.answer_callback_query(call.id, "Произошла ошибка при обработке нажатия.")
+        except:
+            pass
+
+def _handle_callback_logic(call):
     chat_id = call.message.chat.id
     if chat_id in USER_BLOCKED:
         bot.answer_callback_query(call.id, "Диалог остановлен. Вы заблокированы за оффтоп.")
@@ -766,6 +821,7 @@ def handle_callback(call):
 
     if call.data == "accept_disclaimer":
         USER_ACCEPTED_DISCLAIMER.add(chat_id)
+        save_json_state(DISCLAIMER_FILE, list(USER_ACCEPTED_DISCLAIMER))
         bot.answer_callback_query(call.id, "Спасибо за подтверждение!")
         bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
         instructions = (
@@ -830,10 +886,12 @@ def handle_callback(call):
         if chat_id in USER_STATES:
             if val == "Другой":
                 USER_STATES[chat_id]["state"] = "EMERGENCY_REGION_TEXT"
+                save_json_state(STATES_FILE, USER_STATES)
                 bot.send_message(chat_id, "Пожалуйста, введите название вашего района или региона вручную:")
             else:
                 USER_STATES[chat_id]["region"] = val
                 USER_STATES[chat_id]["state"] = "EMERGENCY_CONTACT"
+                save_json_state(STATES_FILE, USER_STATES)
                 
                 markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
                 markup.add(types.KeyboardButton("📱 Поделиться контактом", request_contact=True))
@@ -851,23 +909,53 @@ def handle_callback(call):
         # Симулируем отправку сообщения пользователем в чат, отображая его выбор
         bot.send_message(chat_id, f"👉 Выбрано: {choice}")
         
-        if choice.startswith("Записаться") or "записаться к" in choice.lower() or "записаться на" in choice.lower():
+        if choice.lower() in ["нет, спасибо, мне лучше", "нет спасибо мне лучше", "мне лучше"]:
+            bot.send_message(
+                chat_id,
+                "Очень рад слышать, что вам стало лучше! 🌸 Пожалуйста, берегите себя, отдыхайте и следите за своим самочувствием. "
+                "Если симптомы вернутся или ваше состояние ухудшится, я всегда готов помочь.",
+                reply_markup=get_main_keyboard()
+            )
+            return
+
+        if (choice.startswith("Записаться") or 
+            "записаться к" in choice.lower() or 
+            "записаться на" in choice.lower() or 
+            "записаться к врачу" in choice.lower() or
+            "да, записаться к врачу" in choice.lower()):
+            
             specialty = None
             for key in SPECIALTY_KEYWORDS.keys():
                 if key[:-1] in choice.lower():
                     specialty = key
                     break
             if not specialty:
+                # Попробуем загрузить историю диалога на всякий случай
+                load_chat_history(chat_id)
                 specialty = detect_specialty(chat_id)
                 
             USER_STATES[chat_id] = {
                 "state": "SEARCH_CLINICS_LOCATION",
                 "specialty": specialty
             }
+            save_json_state(STATES_FILE, USER_STATES)
+            
             markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
             btn = types.KeyboardButton("📍 Отправить геолокацию", request_location=True)
             markup.add(btn)
-            bot.send_message(chat_id, "Пожалуйста, поделитесь вашим местоположением (нажав на кнопку ниже 👇), чтобы я мог подобрать ближайшие клиники с нужным специалистом для вашей ситуации:", reply_markup=markup)
+            
+            if specialty:
+                prompt_msg = (
+                    f"Для вашей ситуации рекомендуется очная консультация специалиста: **{specialty}**.\n\n"
+                    "Пожалуйста, **поделитесь вашим местоположением** (нажав на кнопку ниже 👇), чтобы я мог подобрать ближайшие клиники с этим специалистом:"
+                )
+            else:
+                prompt_msg = (
+                    "Для вашей ситуации рекомендуется очная консультация врача.\n\n"
+                    "Пожалуйста, **поделитесь вашим местоположением** (нажав на кнопку ниже 👇), чтобы я мог подобрать ближайшие клиники:"
+                )
+                
+            bot.send_message(chat_id, prompt_msg, parse_mode="Markdown", reply_markup=markup)
             return
 
         if choice.startswith("Вызвать скорую помощь"):
@@ -881,6 +969,7 @@ def handle_callback(call):
                 "location": "",
                 "symptoms": symptoms
             }
+            save_json_state(STATES_FILE, USER_STATES)
             
             markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
             markup.add(types.KeyboardButton("📍 Отправить геолокацию", request_location=True))
@@ -898,7 +987,7 @@ def handle_callback(call):
         context, _ = get_relevant_context(choice)
         reply, markup = ask_deepseek_with_history(chat_id, choice, context)
         if reply is not None:
-            bot.send_message(chat_id, reply, reply_markup=markup, parse_mode='Markdown')
+            send_message_safe(chat_id, reply, reply_markup=markup, parse_mode='Markdown')
 def send_disclaimer(chat_id):
     disclaimer_text = (
         "⚖️ **Важная информация перед началом**\n\n"
@@ -926,6 +1015,12 @@ def send_welcome(message):
     if chat_id in USER_BLOCKED:
         USER_BLOCKED.remove(chat_id)
         
+    save_json_state(STATES_FILE, USER_STATES)
+    save_json_state(DISCLAIMER_FILE, list(USER_ACCEPTED_DISCLAIMER))
+    save_json_state(OFFTOPIC_FILE, USER_OFFTOPIC_COUNT)
+    save_json_state(BLOCKED_FILE, list(USER_BLOCKED))
+    save_chat_history(chat_id)
+        
     welcome_text = "Здравствуйте! 👋 Я медицинский координатор **Санарип**."
     bot.send_message(chat_id, welcome_text, parse_mode='Markdown')
     
@@ -936,6 +1031,7 @@ def send_welcome(message):
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
     chat_id = message.chat.id
+    load_chat_history(chat_id)
     text = message.text.strip()
     
     if chat_id not in USER_ACCEPTED_DISCLAIMER:
@@ -953,6 +1049,7 @@ def handle_text(message):
         if current_state == "EMERGENCY_LOCATION":
             state_data["location"] = text
             state_data["state"] = "EMERGENCY_REGION"
+            save_json_state(STATES_FILE, USER_STATES)
             
             markup = types.InlineKeyboardMarkup(row_width=2)
             markup.add(
@@ -972,6 +1069,7 @@ def handle_text(message):
         elif current_state == "EMERGENCY_REGION_TEXT":
             state_data["region"] = text
             state_data["state"] = "EMERGENCY_NAME"
+            save_json_state(STATES_FILE, USER_STATES)
             bot.send_message(
                 chat_id,
                 "Пожалуйста, напишите ваше **Имя и Фамилию** для завершения вызова:",
@@ -982,7 +1080,9 @@ def handle_text(message):
 
         elif current_state == "EMERGENCY_NAME":
             state_data["name"] = text
+            # save_emergency_request will pop the state, we save it inside or after it
             save_emergency_request(chat_id, state_data)
+            save_json_state(STATES_FILE, USER_STATES)
             return
 
     # Обработка кнопок быстрого меню
@@ -1023,7 +1123,7 @@ def handle_text(message):
     # Запрос к DeepSeek с учетом истории диалога
     reply, markup = ask_deepseek_with_history(chat_id, text, context)
     if reply is not None:
-        bot.send_message(chat_id, reply, reply_markup=markup, parse_mode='Markdown')
+        send_message_safe(chat_id, reply, reply_markup=markup, parse_mode='Markdown')
 
 # --- Голосовые сообщения ---
 
@@ -1151,56 +1251,79 @@ def find_nearest_clinics(lat, lon, specialty=None, top_k=3):
 @bot.message_handler(content_types=['location'])
 def handle_location(message):
     chat_id = message.chat.id
-    if chat_id not in USER_ACCEPTED_DISCLAIMER:
-        send_disclaimer(chat_id)
-        return
-
-    lat = message.location.latitude
-    lon = message.location.longitude
-
-    state_data = USER_STATES.get(chat_id, {})
-    current_state = state_data.get("state")
-
-    if current_state == "EMERGENCY_LOCATION":
-        region = get_bishkek_district_by_coords(lat, lon)
-        state_data["location"] = f"Координаты: {lat}, {lon}"
-        state_data["region"] = region
-        state_data["state"] = "EMERGENCY_NAME"
+    try:
+        # Загружаем историю диалога и состояния
+        load_chat_history(chat_id)
         
-        bot.send_message(
-            chat_id,
-            f"📍 Координаты получены. Район города: **{region}**.\n\nПожалуйста, напишите ваше **Имя и Фамилию** для завершения вызова:",
-            parse_mode="Markdown",
-            reply_markup=types.ReplyKeyboardRemove()
-        )
-        return
+        if chat_id not in USER_ACCEPTED_DISCLAIMER:
+            send_disclaimer(chat_id)
+            return
 
-    # Поиск клиник
-    specialty = state_data.get("specialty") if current_state == "SEARCH_CLINICS_LOCATION" else detect_specialty(chat_id)
-    USER_STATES.pop(chat_id, None)
+        lat = message.location.latitude
+        lon = message.location.longitude
 
-    bot.reply_to(message, "Ищу ближайшие клиники... 🗺️")
-    
-    nearest = find_nearest_clinics(lat, lon, specialty=specialty, top_k=3)
-    if not nearest and specialty:
-        nearest = find_nearest_clinics(lat, lon, specialty=None, top_k=3)
+        # Пытаемся получить состояние по строковому или числовому ключу
+        state_data = USER_STATES.get(chat_id, {}) or USER_STATES.get(str(chat_id), {})
+        current_state = state_data.get("state")
 
-    if not nearest:
-        bot.send_message(chat_id, "Извините, не удалось найти клиники рядом с вами.", reply_markup=get_main_keyboard())
-        return
+        if current_state == "EMERGENCY_LOCATION":
+            region = get_bishkek_district_by_coords(lat, lon)
+            state_data["location"] = f"Координаты: {lat}, {lon}"
+            state_data["region"] = region
+            state_data["state"] = "EMERGENCY_NAME"
+            USER_STATES[chat_id] = state_data
+            save_json_state(STATES_FILE, USER_STATES)
+            
+            bot.send_message(
+                chat_id,
+                f"📍 Координаты получены. Район города: **{region}**.\n\nПожалуйста, напишите ваше **Имя и Фамилию** для завершения вызова:",
+                parse_mode="Markdown",
+                reply_markup=types.ReplyKeyboardRemove()
+            )
+            return
 
-    response = "📍 **Ближайшие клиники для вашей ситуации:**\n\n"
-    for clinic, dist in nearest:
-        response += (
-            f"🏥 **{clinic.get('name')}** (в {dist:.2f} км от вас)\n"
-            f"📍 Адрес: {clinic.get('address')}\n"
-            f"📞 Тел: {clinic.get('phone')}\n"
-            f"🕒 Время работы: {clinic.get('working_hours')}\n"
-            f"🩺 Направления: {', '.join(clinic.get('specializations', [])[:5])}...\n\n"
-        )
-    
-    response += "Вы можете связаться с клиникой напрямую для записи. 👍"
-    bot.send_message(chat_id, response, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        # Поиск клиник
+        specialty = state_data.get("specialty") if current_state == "SEARCH_CLINICS_LOCATION" else detect_specialty(chat_id)
+        USER_STATES.pop(chat_id, None)
+        USER_STATES.pop(str(chat_id), None)
+        save_json_state(STATES_FILE, USER_STATES)
+
+        bot.reply_to(message, "Ищу ближайшие клиники... 🗺️")
+        
+        nearest = find_nearest_clinics(lat, lon, specialty=specialty, top_k=3)
+        if not nearest and specialty:
+            # Если по специальности ничего не найдено, ищем любые ближайшие клиники
+            nearest = find_nearest_clinics(lat, lon, specialty=None, top_k=3)
+
+        if not nearest:
+            bot.send_message(chat_id, "Извините, не удалось найти клиники рядом с вами.", reply_markup=get_main_keyboard())
+            return
+
+        response = "📍 **Ближайшие клиники для вашей ситуации:**\n\n"
+        for clinic, dist in nearest:
+            response += (
+                f"🏥 **{clinic.get('name')}** (в {dist:.2f} км от вас)\n"
+                f"📍 Адрес: {clinic.get('address')}\n"
+                f"📞 Тел: {clinic.get('phone')}\n"
+                f"🕒 Время работы: {clinic.get('working_hours')}\n"
+                f"🩺 Направления: {', '.join(clinic.get('specializations', [])[:5])}...\n\n"
+            )
+        
+        response += "Вы можете связаться с клиникой напрямую для записи. 👍"
+        bot.send_message(chat_id, response, parse_mode="Markdown", reply_markup=get_main_keyboard())
+
+    except Exception as e:
+        print(f"Ошибка в handle_location для chat_id {chat_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        try:
+            bot.send_message(
+                chat_id, 
+                "Произошла ошибка при обработке геоданных. Пожалуйста, попробуйте отправить геолокацию еще раз или напишите ваш адрес текстом.", 
+                reply_markup=get_main_keyboard()
+            )
+        except Exception as send_err:
+            print(f"Не удалось отправить сообщение об ошибке: {send_err}")
 
 
 if __name__ == "__main__":
