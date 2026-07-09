@@ -68,6 +68,34 @@ def save_json_state(file_path, data):
 # Хранилище контекста диалогов (история сообщений для каждого пользователя)
 USER_SESSIONS = {}
 
+ACTIVITY_FILE = os.path.join(BASE_DIR, "data", "user_last_activity.json")
+USER_LAST_ACTIVITY = load_json_state(ACTIVITY_FILE, {})
+
+def check_session_timeout(chat_id):
+    import time
+    current_time = time.time()
+    chat_key = str(chat_id)
+    last_active = USER_LAST_ACTIVITY.get(chat_key) or USER_LAST_ACTIVITY.get(chat_id)
+    
+    # Обновляем время активности
+    USER_LAST_ACTIVITY[chat_key] = current_time
+    save_json_state(ACTIVITY_FILE, USER_LAST_ACTIVITY)
+    
+    if last_active and (current_time - last_active > 3600):
+        USER_SESSIONS[chat_id] = []
+        save_chat_history(chat_id)
+        if chat_id in USER_STATES:
+            del USER_STATES[chat_id]
+            save_json_state(STATES_FILE, USER_STATES)
+            
+        bot.send_message(
+            chat_id,
+            "Приветствую снова! Рад вашему возвращению. Вас что-то начало беспокоить или вы хотите проверить здоровье?",
+            reply_markup=get_main_keyboard()
+        )
+        return True
+    return False
+
 # Состояния заполнения форм
 # Загружаем из файла для персистентности на Vercel/перезапусках
 _raw_states = load_json_state(STATES_FILE, {})
@@ -274,8 +302,14 @@ SYSTEM_PROMPT = (
     "- Разделяй смысловые блоки горизонтальными линиями из символов: `────────────────`.\n"
     "- Разнообразь текст тематическими иконками-эмодзи перед пунктами или важными предупреждениями (например: 🩹, ⚠️, 🌡️, 💊, ❌, ✅, ℹ️, 🚨, 🚑).\n"
     "- В конце сообщения добавляй кнопки строго в формате: [Кнопки: Вариант 1 | Вариант 2]. ВАЖНО: Названия кнопок делай максимально короткими (1-3 слова, до 20 символов), чтобы они полностью помещались на экране телефона и не обрезались.\n\n"
+    "7. ЗАПРЕТ ПОВТОРНЫХ ПРИВЕТСТВИЙ: Если в истории переписки уже есть хотя бы одно твое сообщение, категорически ЗАПРЕЩЕНО писать приветственные слова вроде 'Здравствуйте!', 'Добрый день!', 'Привет!' и т.д. Сразу переходи к сути.\n"
+    "8. ЛАБОРАТОРНЫЕ ИССЛЕДОВАНИЯ И АНАЛИЗЫ: Если пациент спрашивает про сдачу анализов, хочет провериться или найти лабораторию:\n"
+    "   - Ты должен порекомендовать подходящие анализы (например, общий анализ крови, гормоны, витамины) в зависимости от его жалоб.\n"
+    "   - Опрашивай строго по одному вопросу за раз (сначала спроси, что конкретно его беспокоит, и выведи кнопки с типами анализов).\n"
+    "   - Обязательно предложи в конце кнопку действия:\n"
+    "     [Кнопки: Найти лабораторию]\n\n"
     "ОБРАБОТКА ОФФТОПИКА:\n"
-    "Если запрос пользователя вообще не относится к медицине, здоровью или первой помощи, ты должен вежливо попросить его больше не обращаться к боту с такими темами. В этом случае ОБЯЗАТЕЛЬНО добавь в самом начале ответа тег [OFFTOPIC].\n\n"
+    "Если запрос пользователя вообще не относится к медицине, здоровью, первой помощи или сдаче анализов, ты должен вежливо попросить его больше не обращаться к боту с такими темами. В этом случае ОБЯЗАТЕЛЬНО добавь в самом начале ответа тег [OFFTOPIC].\n\n"
     "ЯЗЫКОВОЕ ПРАВИЛО (КРИТИЧЕСКИ ВАЖНО):\n"
     "Обязательно определяй язык, на котором к тебе обращается пациент (русский, кыргызский и т.д.), и ВСЕГДА отвечай строго на том же языке. Все уточняющие вопросы, рекомендации и названия кнопок должны быть переведены на язык пользователя."
 )
@@ -1054,6 +1088,24 @@ def _handle_callback_logic(call):
             )
             return
 
+        if (choice.lower() in ["найти лабораторию", "сдать анализы", "поиск лаборатории", "лаборатория"] or
+            choice.startswith("Найти лабораторию")):
+            USER_STATES[chat_id] = {
+                "state": "SEARCH_CLINICS_LOCATION",
+                "specialty": "лаборатория"
+            }
+            save_json_state(STATES_FILE, USER_STATES)
+            
+            prompt_msg = (
+                "🗺️ Чтобы подобрать **ближайшие лаборатории в Бишкеке**, пожалуйста, **поделитесь вашим местоположением** (нажав на кнопку ниже 👇):"
+            )
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+            btn = types.KeyboardButton("📍 Отправить геолокацию", request_location=True)
+            markup.add(btn)
+            
+            send_message_safe(chat_id, prompt_msg, reply_markup=markup, parse_mode="Markdown")
+            return
+
         if choice.lower() in ["хорошо, буду соблюдать", "хорошо буду соблюдать"]:
             state_data = USER_STATES.get(chat_id, {}) or USER_STATES.get(str(chat_id), {})
             specialty = state_data.get("specialty")
@@ -1254,6 +1306,8 @@ def send_welcome(message):
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
     chat_id = message.chat.id
+    if check_session_timeout(chat_id):
+        return
     load_chat_history(chat_id)
     text = message.text.strip()
     
@@ -1422,9 +1476,10 @@ def handle_text(message):
 
 
 @bot.message_handler(content_types=['voice'])
-
 def handle_voice(message):
     chat_id = message.chat.id
+    if check_session_timeout(chat_id):
+        return
     if chat_id not in USER_ACCEPTED_DISCLAIMER:
         send_disclaimer(chat_id)
         return
@@ -1479,6 +1534,8 @@ def handle_voice(message):
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
     chat_id = message.chat.id
+    if check_session_timeout(chat_id):
+        return
     if chat_id not in USER_ACCEPTED_DISCLAIMER:
         send_disclaimer(chat_id)
         return
@@ -1608,6 +1665,9 @@ def handle_contact(message):
 @bot.message_handler(content_types=['location'])
 def handle_location(message):
     chat_id = message.chat.id
+    import time
+    USER_LAST_ACTIVITY[str(chat_id)] = time.time()
+    save_json_state(ACTIVITY_FILE, USER_LAST_ACTIVITY)
     try:
         # Загружаем историю диалога и состояния
         load_chat_history(chat_id)
