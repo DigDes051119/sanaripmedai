@@ -1048,6 +1048,37 @@ def _handle_callback_logic(call):
             )
             return
 
+        if choice.lower() in ["хорошо, буду соблюдать", "хорошо буду соблюдать"]:
+            state_data = USER_STATES.get(chat_id, {}) or USER_STATES.get(str(chat_id), {})
+            specialty = state_data.get("specialty")
+            
+            # Переводим в состояние ожидания геолокации
+            state_data["state"] = "SEARCH_CLINICS_LOCATION"
+            USER_STATES[chat_id] = state_data
+            save_json_state(STATES_FILE, USER_STATES)
+            
+            # Строим сообщение для отправки геолокации
+            if specialty:
+                prompt_msg = (
+                    "Вам необходимо обратиться к врачу для очного осмотра.\n"
+                    f"Рекомендуемая специальность: **{specialty}**.\n\n"
+                    "────────────────\n"
+                    "🗺️ Пожалуйста, **поделитесь вашим местоположением** (нажав на кнопку ниже 👇), чтобы я мог подобрать ближайшие клиники с этим специалистом:"
+                )
+            else:
+                prompt_msg = (
+                    "Вам необходимо обратиться к врачу для очного осмотра.\n\n"
+                    "────────────────\n"
+                    "🗺️ Пожалуйста, **поделитесь вашим местоположением** (нажав на кнопку ниже 👇), чтобы я мог подобрать ближайшие клиники:"
+                )
+                
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+            btn = types.KeyboardButton("📍 Отправить геолокацию", request_location=True)
+            markup.add(btn)
+            
+            send_message_safe(chat_id, prompt_msg, reply_markup=markup, parse_mode="Markdown")
+            return
+
         if (choice.startswith("Записаться") or 
             "записаться к" in choice.lower() or 
             "записаться на" in choice.lower() or 
@@ -1063,9 +1094,9 @@ def _handle_callback_logic(call):
             # Запрашиваем подробные пошаговые рекомендации и специальность
             prompt_deepseek = (
                 "Пользователь выбрал 'Да, записаться к врачу'. Проанализируй историю диалога. "
-                "Мягко и вежливо успокой пациента, напиши подробные пошаговые рекомендации до осмотра врача (что делать и чего делать нельзя) конкретно для его ситуации, "
-                "и укажи название специальности врача, к которому ему нужно обратиться (обязательно выдели жирным шрифтом, например **невролог**). "
-                "В конце сообщения НЕ добавляй никаких текстовых кнопок и тегов [Кнопки: ...]."
+                "Мягко и вежливо успокой пациента, напиши подробные пошаговые рекомендации до осмотра врача (что делать и чего делать нельзя) конкретно для его ситуации. "
+                "Также укажи название специальности врача, к которому нужно обратиться (обязательно выдели её тегом [SPECIALTY: специальность], например [SPECIALTY: оториноларинголог (ЛОР-врач)]). "
+                "В конце сообщения НЕ добавляй никаких кнопок."
             )
             
             history = USER_SESSIONS.get(chat_id, [])
@@ -1086,11 +1117,23 @@ def _handle_callback_logic(call):
                 print(f"Ошибка получения рекомендации при записи к врачу: {e}")
                 spec_text = f"**{specialty}**" if specialty else "врачу"
                 reply = (
-                    f"Не волнуйтесь, пожалуйста, мы во всём разберёмся. Для вашей ситуации рекомендуется очная консультация специалиста: {spec_text}.\n\n"
-                    "Перед приёмом постарайтесь отдохнуть, исключить физические нагрузки и записать время начала симптомов."
+                    f"Не волнуйтесь, пожалуйста, мы во всём разберёмся. [SPECIALTY: {spec_text}]\n\n"
+                    "Ваши пошаговые рекомендации до приёма врача:\n"
+                    "1. Постарайтесь отдохнуть и исключить физические нагрузки.\n"
+                    "2. Избегайте тепловых процедур (баня, сауна, горячие компрессы) до осмотра.\n"
+                    "3. Постоянно контролируйте свое самочувствие."
                 )
                 
-            # Попробуем извлечь специальность из ответа ИИ, если не определилась ранее
+            # Парсим специальность из тега [SPECIALTY: ...]
+            import re
+            spec_match = re.search(r"\[SPECIALTY:\s*([^\]]+)\]", reply)
+            if spec_match:
+                specialty_parsed = spec_match.group(1).strip()
+                if specialty_parsed:
+                    specialty = specialty_parsed
+                reply = re.sub(r"\[SPECIALTY:\s*[^\]]+\]", "", reply).strip()
+                
+            # Попробуем извлечь специальность из ответа ИИ, если тег не сработал
             if not specialty:
                 for key in SPECIALTY_KEYWORDS.keys():
                     if key[:-1] in reply.lower():
@@ -1098,20 +1141,19 @@ def _handle_callback_logic(call):
                         break
                         
             USER_STATES[chat_id] = {
-                "state": "SEARCH_CLINICS_LOCATION",
+                "state": "CONFIRM_DOCTOR_RECOMMENDATIONS",
                 "specialty": specialty
             }
             save_json_state(STATES_FILE, USER_STATES)
             
-            # Добавляем призыв поделиться геолокацией к сообщению ИИ
+            # Добавляем вежливое завершение и инструкцию соблюдать рекомендации
             reply += (
                 "\n\n────────────────\n"
-                "🗺️ Пожалуйста, **поделитесь вашим местоположением** (нажав на кнопку ниже 👇), чтобы я мог подобрать ближайшие клиники с этим специалистом:"
+                "Пожалуйста, соблюдайте эти рекомендации до приёма врача. "
             )
             
-            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-            btn = types.KeyboardButton("📍 Отправить геолокацию", request_location=True)
-            markup.add(btn)
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(types.InlineKeyboardButton("Хорошо, буду соблюдать", callback_data="user_choice:Хорошо, буду соблюдать"))
             
             send_message_safe(chat_id, reply, reply_markup=markup, parse_mode="Markdown")
             return
