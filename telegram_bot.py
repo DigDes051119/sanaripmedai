@@ -348,7 +348,7 @@ def get_main_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     btn_first_aid = types.KeyboardButton("📚 Первая помощь")
     btn_clinics = types.KeyboardButton("🏥 Клиники Бишкека")
-    btn_emergency = types.KeyboardButton("🚑 Экстренный случай (103)")
+    btn_emergency = types.KeyboardButton("🚑 Вызвать скорую помощь (103)")
     markup.row(btn_first_aid, btn_clinics)
     markup.row(btn_emergency)
     return markup
@@ -1448,16 +1448,25 @@ def handle_text(message):
         )
         return
 
-    elif text == "🚑 Экстренный случай (103)":
-        emergency_text = (
-            "🚨 **Экстренная служба скорой помощи: 103**\n\n"
-            "Пожалуйста, звоните по номеру 103 немедленно при следующих симптомах:\n"
-            "- Потеря сознания или затрудненное дыхание\n"
-            "- Сильная непрекращающаяся боль в груди\n"
-            "- Обильное кровотечение, которое не останавливается\n"
-            "- Подозрение на серьезный перелом позвоночника или черепно-мозговую травму"
+    elif text in ["🚑 Экстренный случай (103)", "🚑 Вызвать скорую помощь (103)"]:
+        USER_STATES[chat_id] = {
+            "state": "EMERGENCY_LOCATION",
+            "name": "",
+            "region": "",
+            "location": "",
+            "symptoms": "Прямой вызов скорой помощи через меню"
+        }
+        save_json_state(STATES_FILE, USER_STATES)
+        
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        markup.add(types.KeyboardButton("📍 Отправить геолокацию", request_location=True))
+        bot.send_message(
+            chat_id, 
+            "🚨 **Регистрация экстренного вызова**\n\n"
+            "Для быстрого реагирования нам нужны ваши координаты. Пожалуйста, **отправьте вашу геолокацию** с помощью кнопки ниже 👇 или напишите ваш **точный адрес текстом**:", 
+            parse_mode="Markdown", 
+            reply_markup=markup
         )
-        bot.send_message(chat_id, emergency_text, parse_mode='Markdown')
         return
 
     # Стандартный запрос к ИИ
