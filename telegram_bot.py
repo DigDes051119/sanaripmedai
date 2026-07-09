@@ -984,14 +984,20 @@ def _handle_callback_logic(call):
             clinic = CLINICS_DB[index]
             bot.answer_callback_query(call.id, "Загружаю...")
             
-            doctors_info = "\n".join([f"👨‍⚕️ {doc['name']} З {doc['specialty']} ({doc['rating']})" for doc in clinic.get("doctors", [])])
+            doctors_list = []
+            for doc in clinic.get("doctors", []):
+                rating = doc.get("rating")
+                rating_str = f" ({rating})" if rating else ""
+                doctors_list.append(f"👨‍⚕️ {doc['name']} — {doc['specialty']}{rating_str}")
+            
+            doctors_info = "\n".join(doctors_list) if doctors_list else "Информация уточняется."
             
             message_text = (
-                f"🏥 {clinic.get('name')}\n\n"
-                f"📍 Адрес: {clinic.get('address')}\n"
-                f"📞 Контакты: {clinic.get('phone')}\n"
-                f"🕒 Часы работы: {clinic.get('working_hours')}\n\n"
-                f"🩺 Врачи клиники:\n{doctors_info}"
+                f"🏥 **{clinic.get('name')}**\n\n"
+                f"📍 **Адрес:** {clinic.get('address')}\n"
+                f"📞 **Контакты:** {clinic.get('phone')}\n"
+                f"🕒 **Часы работы:** {clinic.get('working_hours')}\n\n"
+                f"🩺 **Врачи клиники:**\n{doctors_info}"
             )
             bot.send_message(chat_id, message_text)
         except Exception as e:
@@ -1512,11 +1518,40 @@ def handle_photo(message):
 def find_nearest_clinics(lat, lon, specialty=None, top_k=3):
     import math
     results = []
+    
+    # Нормализуем и подбираем синонимы специальности для гибкого поиска
+    search_terms = []
+    if specialty:
+        spec_lower = specialty.lower()
+        search_terms.append(spec_lower)
+        
+        synonyms = {
+            "лор": ["оториноларинголог", "отоларинголог", "ухо", "горло", "нос"],
+            "оториноларинголог": ["лор", "отоларинголог"],
+            "отоларинголог": ["лор", "оториноларинголог"],
+            "стоматолог": ["зубной"],
+            "окулист": ["офтальмолог"],
+            "офтальмолог": ["окулист"],
+            "терапевт": ["семейный врач"]
+        }
+        for key, val in synonyms.items():
+            if key in spec_lower:
+                search_terms.extend(val)
+
     for clinic in CLINICS_DB:
         if specialty:
             specializations = [s.lower() for s in clinic.get("specializations", [])]
             doc_specialties = [d.get("specialty", "").lower() for d in clinic.get("doctors", [])]
-            if specialty.lower() not in specializations and not any(specialty.lower() in ds for ds in doc_specialties):
+            
+            matched = False
+            for term in search_terms:
+                if any(term in spec or spec in term for spec in specializations):
+                    matched = True
+                    break
+                if any(term in ds or ds in term for ds in doc_specialties):
+                    matched = True
+                    break
+            if not matched:
                 continue
                 
         clat = clinic.get("latitude")
@@ -1641,18 +1676,21 @@ def handle_location(message):
             bot.send_message(chat_id, "Извините, не удалось найти клиники рядом с вами.", reply_markup=get_main_keyboard())
             return
 
-        response = "📍 **Ближайшие клиники для вашей ситуации:**\n\n"
+        markup = types.InlineKeyboardMarkup(row_width=1)
         for clinic, dist in nearest:
-            response += (
-                f"🏥 **{clinic.get('name')}** (в {dist:.2f} км от вас)\n"
-                f"📍 Адрес: {clinic.get('address')}\n"
-                f"📞 Тел: {clinic.get('phone')}\n"
-                f"🕒 Время работы: {clinic.get('working_hours')}\n"
-                f"🩺 Направления: {', '.join(clinic.get('specializations', [])[:5])}...\n\n"
-            )
-        
-        response += "Вы можете связаться с клиникой напрямую для записи. 👍"
-        bot.send_message(chat_id, response, parse_mode="Markdown", reply_markup=get_main_keyboard())
+            # Находим индекс клиники в базе CLINICS_DB для правильного колбэка
+            try:
+                clinic_idx = CLINICS_DB.index(clinic)
+            except ValueError:
+                continue
+            btn_text = f"🏥 {clinic.get('name')} ({dist:.2f} км)"
+            markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"clinic_{clinic_idx}"))
+            
+        response = (
+            "📍 **Мы подобрали ближайшие клиники с нужным специалистом:**\n\n"
+            "Пожалуйста, **выберите интересующую клинику ниже 👇**, чтобы увидеть контакты, точный адрес, расписание работы и список врачей:"
+        )
+        bot.send_message(chat_id, response, reply_markup=markup, parse_mode="Markdown")
 
     except Exception as e:
         print(f"Ошибка в handle_location для chat_id {chat_id}: {e}")
