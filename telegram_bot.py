@@ -705,7 +705,43 @@ def save_emergency_request(chat_id, state_data):
         f"🩺 **Описанные симптомы:** {request_entry['symptoms']}\n\n"
         "🚑 Бригада скорой помощи формируется. Пожалуйста, оставайтесь на связи по этому номеру телефона. Если ситуация ухудшится, немедленно звоните по номеру **103**."
     )
-    bot.send_message(chat_id, confirmation_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+    send_message_safe(chat_id, confirmation_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
+
+    # Генерируем пошаговые рекомендации первой помощи до приезда скорой
+    bot.send_chat_action(chat_id, 'typing')
+    
+    prompt_deepseek = (
+        f"Пользователь успешно зарегистрировал экстренный вызов скорой помощи. Симптомы: '{request_entry['symptoms']}'. "
+        "Проанализируй историю диалога и напиши очень четкую, пошаговую инструкцию первой помощи, "
+        "которую пациент или находящиеся рядом близкие должны выполнить прямо сейчас до приезда скорой помощи (что делать и чего делать категорически нельзя). "
+        "Пиши кратко, хладнокровно, по делу. Начни с ободряющих слов поддержки. В конце НЕ предлагай никаких текстовых кнопок и тегов [Кнопки: ...]."
+    )
+    
+    history = USER_SESSIONS.get(chat_id, [])
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": prompt_deepseek})
+    
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": messages,
+        "temperature": 0.4,
+    }
+    
+    try:
+        resp = requests_post_deepseek(payload, timeout=15)
+        aid_reply = resp.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        print(f"Ошибка генерации первой помощи до приезда скорой: {e}")
+        aid_reply = (
+            "📋 **Рекомендации до приезда скорой помощи:**\n\n"
+            "1. Обеспечьте приток свежего воздуха (откройте окно).\n"
+            "2. Уложите пациента в удобное положение, расстегните стесняющую одежду.\n"
+            "3. Постоянно контролируйте дыхание и пульс.\n"
+            "❌ Категорически запрещено давать пациенту медикаменты, воду или еду до осмотра врачом."
+        )
+        
+    send_message_safe(chat_id, aid_reply, parse_mode="Markdown")
 
 
 def transcribe_voice_with_groq(file_bytes: bytes) -> str:
