@@ -2,11 +2,83 @@ import os
 import json
 import base64
 import math
+import time
+import threading
+import difflib
 import requests
 import telebot
 from telebot import types
 from dotenv import load_dotenv
 from rag_updater import SimpleTFIDFIndex, start_background_updater
+
+# ─── Round-Robin счётчики (thread-safe) ───────────────────────────────────────
+_rr_lock = threading.Lock()
+_rr_deepseek_idx = 0
+_rr_groq_idx = 0
+_rr_gemini_idx = 0
+
+def _rr_next(counter_name: str, pool_size: int) -> int:
+    """Возвращает следующий индекс ключа в пуле (Round-Robin, thread-safe)"""
+    global _rr_deepseek_idx, _rr_groq_idx, _rr_gemini_idx
+    with _rr_lock:
+        if counter_name == 'deepseek':
+            idx = _rr_deepseek_idx % pool_size
+            _rr_deepseek_idx += 1
+        elif counter_name == 'groq':
+            idx = _rr_groq_idx % pool_size
+            _rr_groq_idx += 1
+        else:  # gemini
+            idx = _rr_gemini_idx % pool_size
+            _rr_gemini_idx += 1
+    return idx
+
+# ─── Redis-клиент (семантический кэш) ─────────────────────────────────────────
+try:
+    import redis as redis_lib
+    _redis = redis_lib.Redis(host='localhost', port=6379, db=0, decode_responses=True, socket_connect_timeout=2)
+    _redis.ping()
+    print("[Cache] Redis подключен успешно — семантический кэш активен.")
+except Exception as _redis_err:
+    _redis = None
+    print(f"[Cache] Redis недоступен ({_redis_err}) — работаем без кэша.")
+
+SEMANTIC_CACHE_TTL = 86400        # 24 часа
+SEMANTIC_CACHE_THRESHOLD = 0.92   # сходство >= 92% → кэш
+SEMANTIC_CACHE_PREFIX = "sem_cache:"
+
+def _cache_get(question: str):
+    """Ищет похожий вопрос в Redis-кэше. Возвращает ответ или None."""
+    if not _redis:
+        return None
+    try:
+        keys = _redis.keys(SEMANTIC_CACHE_PREFIX + "*")
+        if not keys:
+            return None
+        best_ratio = 0.0
+        best_val = None
+        q_lower = question.lower().strip()
+        for k in keys:
+            cached_q = k[len(SEMANTIC_CACHE_PREFIX):]
+            ratio = difflib.SequenceMatcher(None, q_lower, cached_q.lower()).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_val = _redis.get(k)
+        if best_ratio >= SEMANTIC_CACHE_THRESHOLD and best_val:
+            print(f"[Cache] Кэш-попадание (сходство {best_ratio:.2f}): возвращаем сохранённый ответ.")
+            return best_val
+    except Exception as e:
+        print(f"[Cache] Ошибка чтения кэша: {e}")
+    return None
+
+def _cache_set(question: str, answer: str):
+    """Сохраняет пару вопрос→ответ в Redis-кэш."""
+    if not _redis:
+        return
+    try:
+        key = SEMANTIC_CACHE_PREFIX + question.lower().strip()[:200]
+        _redis.setex(key, SEMANTIC_CACHE_TTL, answer)
+    except Exception as e:
+        print(f"[Cache] Ошибка записи кэша: {e}")
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -236,8 +308,8 @@ def reply_to_safe(message, text, reply_markup=None, parse_mode='Markdown'):
 
 
 def requests_post_deepseek(payload, timeout=15):
-    """Отправляет POST-запрос к DeepSeek API с ротацией ключей и резервным OpenRouter"""
-    # 1. Сначала пробуем пул ключей DeepSeek
+    """POST к DeepSeek с Round-Robin ротацией, retry при 429 и fallback на OpenRouter"""
+    # ── Пул ключей DeepSeek ───────────────────────────────────────────────────
     keys_str = os.getenv("DEEPSEEK_API_KEYS", "")
     if keys_str:
         keys = [k.strip() for k in keys_str.split(",") if k.strip()]
@@ -247,34 +319,41 @@ def requests_post_deepseek(payload, timeout=15):
             os.getenv("DEEPSEEK_API_KEY_SECONDARY")
         ]
     keys = [k for k in keys if k and k.strip() and k != "your_deepseek_api_key_here"]
-    
+
     last_err = None
     if keys:
-        for i, key in enumerate(keys):
+        start_idx = _rr_next('deepseek', len(keys))  # Round-Robin
+        for offset in range(len(keys)):
+            i = (start_idx + offset) % len(keys)
+            key = keys[i]
             headers = {
                 "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json"
             }
             try:
-                print(f"[API Router] Запрос к официальному DeepSeek (ключ #{i+1})...")
+                print(f"[API Router] DeepSeek Round-Robin (ключ #{i+1}/{len(keys)})...")
                 resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=timeout)
                 if resp.status_code == 200:
                     return resp
+                elif resp.status_code == 429:
+                    print(f"[API Router] DeepSeek ключ #{i+1} — Rate Limit 429. Пауза 7 сек...")
+                    time.sleep(7)
+                    last_err = f"HTTP 429 (rate limit)"
                 else:
-                    last_err = f"HTTP {resp.status_code}: {resp.text}"
-                    print(f"[API Router] Ошибка ключа DeepSeek #{i+1}: {last_err}")
+                    last_err = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                    print(f"[API Router] Ошибка DeepSeek #{i+1}: {last_err}")
             except Exception as e:
                 last_err = str(e)
-                print(f"[API Router] Сбой ключа DeepSeek #{i+1}: {last_err}")
-                
-    # 2. Если DeepSeek не сработал, пробуем OpenRouter
+                print(f"[API Router] Сбой DeepSeek #{i+1}: {last_err}")
+
+    # ── Fallback: OpenRouter ──────────────────────────────────────────────────
     openrouter_keys_str = os.getenv("OPENROUTER_API_KEYS", "")
     if openrouter_keys_str:
         or_keys = [k.strip() for k in openrouter_keys_str.split(",") if k.strip()]
     else:
         or_keys = [os.getenv("OPENROUTER_API_KEY")]
     or_keys = [k for k in or_keys if k and k.strip()]
-    
+
     if or_keys:
         print("[API Router] Переключение на резервный провайдер OpenRouter...")
         or_payload = payload.copy()
@@ -287,17 +366,20 @@ def requests_post_deepseek(payload, timeout=15):
                 "X-Title": "Sanarip Med AI"
             }
             try:
-                print(f"[API Router] Запрос к OpenRouter (ключ #{j+1})...")
+                print(f"[API Router] OpenRouter (ключ #{j+1})...")
                 resp = requests.post("https://openrouter.ai/api/v1/chat/completions", json=or_payload, headers=headers, timeout=timeout)
                 if resp.status_code == 200:
                     return resp
+                elif resp.status_code == 429:
+                    print(f"[API Router] OpenRouter ключ #{j+1} — Rate Limit. Пауза 7 сек...")
+                    time.sleep(7)
                 else:
-                    last_err = f"OpenRouter HTTP {resp.status_code}: {resp.text}"
+                    last_err = f"OpenRouter HTTP {resp.status_code}: {resp.text[:200]}"
                     print(f"[API Router] Ошибка OpenRouter #{j+1}: {last_err}")
             except Exception as e:
                 last_err = str(e)
                 print(f"[API Router] Сбой OpenRouter #{j+1}: {last_err}")
-                
+
     raise Exception(f"Все API-ключи DeepSeek и OpenRouter вернули ошибку. Последняя ошибка: {last_err}")
 
 
@@ -550,6 +632,14 @@ def ask_deepseek_with_history(chat_id: int, user_message: str, context: str = ""
     USER_SESSIONS[chat_id].append({"role": "user", "content": user_message})
     save_chat_history(chat_id)
 
+    # ── Семантический кэш (экономия 40% API-запросов) ──────────────────────────
+    cached = _cache_get(user_message)
+    if cached:
+        clean_text, markup = parse_dynamic_buttons(cached)
+        USER_SESSIONS[chat_id].append({"role": "assistant", "content": cached})
+        save_chat_history(chat_id)
+        return clean_text, markup
+
     # Ограничиваем историю последними 10 сообщениями
     USER_SESSIONS[chat_id] = USER_SESSIONS[chat_id][-10:]
 
@@ -643,6 +733,10 @@ def ask_deepseek_with_history(chat_id: int, user_message: str, context: str = ""
         # Добавляем ответ ассистента в историю диалога
         USER_SESSIONS[chat_id].append({"role": "assistant", "content": raw_reply})
         save_chat_history(chat_id)
+
+        # Сохраняем в семантический кэш (кроме персонализированных ответов)
+        if len(user_message) > 10 and "[OFFTOPIC]" not in raw_reply:
+            _cache_set(user_message, raw_reply)
         
         # Обработка тега [OFFTOPIC]
         reply = raw_reply
@@ -951,20 +1045,23 @@ def transcribe_voice_with_groq(file_bytes: bytes) -> str:
 
 
 def analyze_image_with_gemini(image_bytes: bytes) -> str:
-    """Резервный анализ изображений через API Google Gemini 1.5/2.0 Flash"""
+    """Резервный анализ изображений через Gemini 1.5/2.0 Flash — Round-Robin + retry при 429"""
     gemini_keys_str = os.getenv("GEMINI_API_KEYS", "")
     if gemini_keys_str:
         keys = [k.strip() for k in gemini_keys_str.split(",") if k.strip()]
     else:
         keys = [os.getenv("GEMINI_API_KEY")]
     keys = [k for k in keys if k and k.strip()]
-    
+
     if not keys:
         return None
-        
+
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
-    
-    for key in keys:
+    start_idx = _rr_next('gemini', len(keys))  # Round-Robin
+
+    for offset in range(len(keys)):
+        i = (start_idx + offset) % len(keys)
+        key = keys[i]
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}"
         payload = {
             "contents": [{
@@ -981,20 +1078,23 @@ def analyze_image_with_gemini(image_bytes: bytes) -> str:
         }
         headers = {"Content-Type": "application/json"}
         try:
-            print("[Gemini Router] Попытка запроса к Gemini Flash Vision...")
+            print(f"[Gemini Router] Round-Robin Gemini Flash (ключ #{i+1}/{len(keys)})...")
             resp = requests.post(url, json=payload, headers=headers, timeout=20)
             if resp.status_code == 200:
                 data = resp.json()
                 return data["candidates"][0]["content"]["parts"][0]["text"]
+            elif resp.status_code == 429:
+                print(f"[Gemini Router] Ключ #{i+1} — Rate Limit 429. Пауза 7 сек...")
+                time.sleep(7)
             else:
-                print(f"[Gemini Router] Ошибка Gemini: {resp.status_code} {resp.text}")
+                print(f"[Gemini Router] Ошибка Gemini #{i+1}: {resp.status_code} {resp.text[:200]}")
         except Exception as e:
-            print(f"[Gemini Router] Исключение при запросе к Gemini: {e}")
+            print(f"[Gemini Router] Исключение #{i+1}: {e}")
     return None
 
 
 def analyze_image_with_groq(image_bytes: bytes) -> str:
-    """Отправка изображения в Groq Cloud Vision API (Llama-3.2 Vision) с фолбэком на Gemini и ротацией ключей"""
+    """Groq Vision — Round-Robin + retry при 429 + fallback на Gemini"""
     groq_keys_str = os.getenv("GROQ_API_KEYS", "")
     if groq_keys_str:
         keys = [k.strip() for k in groq_keys_str.split(",") if k.strip()]
@@ -1023,28 +1123,34 @@ def analyze_image_with_groq(image_bytes: bytes) -> str:
             "temperature": 0.5,
             "max_tokens": 1024
         }
-        for i, key in enumerate(keys):
+        start_idx = _rr_next('groq', len(keys))  # Round-Robin
+        for offset in range(len(keys)):
+            i = (start_idx + offset) % len(keys)
+            key = keys[i]
             headers = {
                 "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json"
             }
             try:
-                print(f"[Groq Router] Попытка запроса к Groq Vision (ключ #{i+1})...")
+                print(f"[Groq Router] Round-Robin Groq Vision (ключ #{i+1}/{len(keys)})...")
                 resp = requests.post(GROQ_URL, json=payload, headers=headers, timeout=30)
                 if resp.status_code == 200:
                     return resp.json()["choices"][0]["message"]["content"]
+                elif resp.status_code == 429:
+                    print(f"[Groq Router] Ключ #{i+1} — Rate Limit 429. Пауза 7 сек...")
+                    time.sleep(7)
                 else:
-                    print(f"[Groq Router] Ошибка Groq API (ключ #{i+1}): {resp.status_code} {resp.text}")
+                    print(f"[Groq Router] Ошибка Groq #{i+1}: {resp.status_code} {resp.text[:200]}")
             except Exception as e:
-                print(f"[Groq Router] Сбой Groq (ключ #{i+1}): {e}")
+                print(f"[Groq Router] Сбой Groq #{i+1}: {e}")
 
-    # Фолбэк на Gemini
-    print("[API Router] ВНИМАНИЕ: Переключение на резервный Gemini Flash Vision...")
+    # Fallback на Gemini
+    print("[API Router] Переключение на резервный Gemini Flash Vision...")
     gemini_reply = analyze_image_with_gemini(image_bytes)
     if gemini_reply:
         return gemini_reply
 
-    return "Не удалось распознать изображение. Пожалуйста, сделайте новую фотографию, желательно при хорошем освещении и более четко."
+    return "Не удалось распознать изображение. Пожалуйста, сделайте новую фотографию при хорошем освещении."
 
 
 def is_offtopic_text(text: str) -> bool:

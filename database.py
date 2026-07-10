@@ -5,6 +5,57 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 
+# ─── Шифрование ПДн (Fernet / AES-128) ─────────────────────────────────────────────
+try:
+    from cryptography.fernet import Fernet
+    _pii_key_raw = os.getenv("PII_ENCRYPTION_KEY", "")
+    if _pii_key_raw:
+        _fernet = Fernet(_pii_key_raw.encode())
+        print("[DB/Crypto] Шифрование ПДн (Fernet) активировано.")
+    else:
+        _fernet = None
+        print("[DB/Crypto] PII_ENCRYPTION_KEY не задан — персональные данные хранятся без шифрования.")
+except ImportError:
+    _fernet = None
+    print("[DB/Crypto] cryptography не установлен — шифрование работает в режиме passthrough.")
+
+_PII_FIELDS = {"name", "phone", "phone_number", "location", "address", "full_name", "имя", "телефон"}
+
+def encrypt_pii(value: str) -> str:
+    """Шифрует строку Fernet (если ключ задан)."""
+    if _fernet and isinstance(value, str):
+        return _fernet.encrypt(value.encode()).decode()
+    return value
+
+def decrypt_pii(value: str) -> str:
+    """Дешифрует строку Fernet (если ключ задан)."""
+    if _fernet and isinstance(value, str):
+        try:
+            return _fernet.decrypt(value.encode()).decode()
+        except Exception:
+            return value  # уже было открыто или не зашифровано
+    return value
+
+def _encrypt_dict_pii(data: dict) -> dict:
+    """Шифрует все ПДн-поля в словаре перед записью."""
+    result = {}
+    for k, v in data.items():
+        if k.lower() in _PII_FIELDS and isinstance(v, str):
+            result[k] = encrypt_pii(v)
+        else:
+            result[k] = v
+    return result
+
+def _decrypt_dict_pii(data: dict) -> dict:
+    """Дешифрует все ПДн-поля после чтения из БД."""
+    result = {}
+    for k, v in data.items():
+        if k.lower() in _PII_FIELDS and isinstance(v, str):
+            result[k] = decrypt_pii(v)
+        else:
+            result[k] = v
+    return result
+
 # Загружаем переменные окружения из .env
 load_dotenv()
 
@@ -256,13 +307,15 @@ def set_user_state(chat_id, state_data):
 
 # 3. Appointments
 def save_appointment(chat_id, appointment_data):
+    # Шифруем ПДн-поля перед записью в БД
+    encrypted_data = _encrypt_dict_pii(appointment_data)
     conn = get_connection()
     if conn:
         try:
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO appointments (chat_id, data) VALUES (%s, %s)",
-                    (chat_id, json.dumps(appointment_data))
+                    (chat_id, json.dumps(encrypted_data))
                 )
                 conn.commit()
                 return
@@ -271,10 +324,10 @@ def save_appointment(chat_id, appointment_data):
             conn.rollback()
         finally:
             conn.close()
-            
+
     # Fallback
     appointments = load_json_state(APPOINTMENTS_FILE, [])
-    appointments.append(appointment_data)
+    appointments.append(encrypted_data)
     save_json_state(APPOINTMENTS_FILE, appointments)
 
 def get_all_appointments():
@@ -290,6 +343,7 @@ def get_all_appointments():
                     item = row["data"]
                     if isinstance(item, str):
                         item = json.loads(item)
+                    item = _decrypt_dict_pii(item)
                     item["id"] = row["id"]
                     item["chat_id"] = row["chat_id"]
                     appointments.append(item)
@@ -304,13 +358,15 @@ def get_all_appointments():
 
 # 4. Emergency Requests
 def save_emergency_request(chat_id, request_data):
+    # Шифруем ПДн-поля перед записью
+    encrypted_data = _encrypt_dict_pii(request_data)
     conn = get_connection()
     if conn:
         try:
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO emergency_requests (chat_id, data) VALUES (%s, %s)",
-                    (chat_id, json.dumps(request_data))
+                    (chat_id, json.dumps(encrypted_data))
                 )
                 conn.commit()
                 return
@@ -319,10 +375,10 @@ def save_emergency_request(chat_id, request_data):
             conn.rollback()
         finally:
             conn.close()
-            
+
     # Fallback
     requests_list = load_json_state(EMERGENCY_FILE, [])
-    requests_list.append(request_data)
+    requests_list.append(encrypted_data)
     save_json_state(EMERGENCY_FILE, requests_list)
 
 def get_all_emergency_requests():
@@ -337,6 +393,7 @@ def get_all_emergency_requests():
                     item = row["data"]
                     if isinstance(item, str):
                         item = json.loads(item)
+                    item = _decrypt_dict_pii(item)
                     item["id"] = row["id"]
                     item["chat_id"] = row["chat_id"]
                     requests_list.append(item)
