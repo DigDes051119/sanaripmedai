@@ -41,35 +41,124 @@ GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 # Определение путей и базовой директории
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Пути к файлам персистентного хранения состояний
-STATES_FILE = os.path.join(BASE_DIR, "data", "user_states.json")
-DISCLAIMER_FILE = os.path.join(BASE_DIR, "data", "user_accepted_disclaimer.json")
-OFFTOPIC_FILE = os.path.join(BASE_DIR, "data", "user_offtopic_count.json")
-BLOCKED_FILE = os.path.join(BASE_DIR, "data", "user_blocked.json")
+# База данных
+from database import (
+    get_user_data,
+    update_user_field,
+    get_user_state,
+    set_user_state,
+    save_appointment as db_save_appointment,
+    get_all_appointments,
+    save_emergency_request as db_save_emergency_request,
+    get_all_emergency_requests,
+    get_chat_history,
+    set_chat_history
+)
 
-def load_json_state(file_path, default):
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"Ошибка загрузки состояния из {file_path}: {e}")
-    return default
+class DbUserStatesProxy:
+    def __getitem__(self, chat_id):
+        val = get_user_state(chat_id)
+        if val is None:
+            raise KeyError(chat_id)
+        return val
+
+    def __setitem__(self, chat_id, value):
+        set_user_state(chat_id, value)
+
+    def __delitem__(self, chat_id):
+        set_user_state(chat_id, None)
+
+    def get(self, chat_id, default=None):
+        val = get_user_state(chat_id)
+        return val if val is not None else default
+
+    def pop(self, chat_id, default=None):
+        val = get_user_state(chat_id)
+        if val is not None:
+            set_user_state(chat_id, None)
+            return val
+        return default
+
+    def __contains__(self, chat_id):
+        return get_user_state(chat_id) is not None
+
+class DbOfftopicProxy:
+    def __getitem__(self, chat_id):
+        data = get_user_data(chat_id)
+        return data.get("offtopic_count", 0)
+
+    def __setitem__(self, chat_id, value):
+        update_user_field(chat_id, "offtopic_count", value)
+
+    def get(self, chat_id, default=0):
+        data = get_user_data(chat_id)
+        return data.get("offtopic_count", default)
+
+class DbBlockedProxy:
+    def __contains__(self, chat_id):
+        data = get_user_data(chat_id)
+        return bool(data.get("blocked"))
+
+    def add(self, chat_id):
+        update_user_field(chat_id, "blocked", True)
+
+    def remove(self, chat_id):
+        update_user_field(chat_id, "blocked", False)
+
+    def discard(self, chat_id):
+        update_user_field(chat_id, "blocked", False)
+
+class DbDisclaimerProxy:
+    def __contains__(self, chat_id):
+        data = get_user_data(chat_id)
+        return bool(data.get("accepted_disclaimer"))
+
+    def add(self, chat_id):
+        update_user_field(chat_id, "accepted_disclaimer", True)
+
+    def remove(self, chat_id):
+        update_user_field(chat_id, "accepted_disclaimer", False)
+
+    def discard(self, chat_id):
+        update_user_field(chat_id, "accepted_disclaimer", False)
+
+class DbActivityProxy:
+    def get(self, chat_id, default=0.0):
+        data = get_user_data(chat_id)
+        return data.get("last_activity") or default
+
+    def __getitem__(self, chat_id):
+        data = get_user_data(chat_id)
+        return data.get("last_activity") or 0.0
+
+    def __setitem__(self, chat_id, value):
+        update_user_field(chat_id, "last_activity", value)
 
 def save_json_state(file_path, data):
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    # Данные сохраняются в БД автоматически при изменении через Proxy
+    if isinstance(data, (DbUserStatesProxy, DbOfftopicProxy, DbBlockedProxy, DbDisclaimerProxy, DbActivityProxy)):
+        return
     try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        from database import save_json_state as db_save_json
+        db_save_json(file_path, data)
     except Exception as e:
-        print(f"Ошибка сохранения состояния в {file_path}: {e}")
+        print(f"Ошибка сохранения состояния: {e}")
+
+STATES_FILE = "user_states.json"
+DISCLAIMER_FILE = "user_accepted_disclaimer.json"
+OFFTOPIC_FILE = "user_offtopic_count.json"
+BLOCKED_FILE = "user_blocked.json"
+ACTIVITY_FILE = "user_last_activity.json"
 
 # Хранилище контекста диалогов (история сообщений для каждого пользователя)
 USER_SESSIONS = {}
+USER_LAST_ACTIVITY = DbActivityProxy()
+USER_STATES = DbUserStatesProxy()
+USER_OFFTOPIC_COUNT = DbOfftopicProxy()
+USER_BLOCKED = DbBlockedProxy()
+USER_ACCEPTED_DISCLAIMER = DbDisclaimerProxy()
+USER_TOKEN_USAGE = {}
 
-ACTIVITY_FILE = os.path.join(BASE_DIR, "data", "user_last_activity.json")
-USER_LAST_ACTIVITY = load_json_state(ACTIVITY_FILE, {})
 
 def check_session_timeout(chat_id):
     import time
@@ -79,14 +168,12 @@ def check_session_timeout(chat_id):
     
     # Обновляем время активности
     USER_LAST_ACTIVITY[chat_key] = current_time
-    save_json_state(ACTIVITY_FILE, USER_LAST_ACTIVITY)
     
     if last_active and (current_time - last_active > 3600):
         USER_SESSIONS[chat_id] = []
         save_chat_history(chat_id)
         if chat_id in USER_STATES:
             del USER_STATES[chat_id]
-            save_json_state(STATES_FILE, USER_STATES)
             
         bot.send_message(
             chat_id,
@@ -96,35 +183,19 @@ def check_session_timeout(chat_id):
         return True
     return False
 
-# Состояния заполнения форм
-# Загружаем из файла для персистентности на Vercel/перезапусках
-_raw_states = load_json_state(STATES_FILE, {})
-USER_STATES = {int(k) if k.isdigit() else k: v for k, v in _raw_states.items()}
-
-# Отслеживание оффтопика и блокировок
-_raw_offtopic = load_json_state(OFFTOPIC_FILE, {})
-USER_OFFTOPIC_COUNT = {int(k) if k.isdigit() else k: v for k, v in _raw_offtopic.items()}
-
-USER_BLOCKED = set(load_json_state(BLOCKED_FILE, []))
-USER_ACCEPTED_DISCLAIMER = set(load_json_state(DISCLAIMER_FILE, []))
-USER_TOKEN_USAGE = {}
-
 def load_chat_history(chat_id):
-    """Загружает историю диалога с диска, если она еще не загружена в память"""
+    """Загружает историю диалога из БД, если она еще не загружена в память"""
     if chat_id in USER_SESSIONS:
         return USER_SESSIONS[chat_id]
     
-    file_path = os.path.join(BASE_DIR, "data", "chat_histories", f"{chat_id}.json")
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                USER_SESSIONS[chat_id] = data.get("history", [])
-                if "usage_stats" in data:
-                    USER_TOKEN_USAGE[chat_id] = data["usage_stats"]
-                return USER_SESSIONS[chat_id]
-        except Exception as e:
-            print(f"Ошибка загрузки истории чата для {chat_id}: {e}")
+    try:
+        data = get_chat_history(chat_id)
+        USER_SESSIONS[chat_id] = data.get("history", [])
+        if "usage_stats" in data:
+            USER_TOKEN_USAGE[chat_id] = data["usage_stats"]
+        return USER_SESSIONS[chat_id]
+    except Exception as e:
+        print(f"Ошибка загрузки истории чата для {chat_id}: {e}")
     
     USER_SESSIONS[chat_id] = []
     return USER_SESSIONS[chat_id]
@@ -165,36 +236,69 @@ def reply_to_safe(message, text, reply_markup=None, parse_mode='Markdown'):
 
 
 def requests_post_deepseek(payload, timeout=15):
-    """Отправляет POST-запрос к DeepSeek API с поддержкой резервного API-ключа при сбоях или таймаутах"""
-    keys = [
-        os.getenv("DEEPSEEK_API_KEY"),
-        os.getenv("DEEPSEEK_API_KEY_SECONDARY")
-    ]
-    # Фильтруем пустые и дефолтные ключи
+    """Отправляет POST-запрос к DeepSeek API с ротацией ключей и резервным OpenRouter"""
+    # 1. Сначала пробуем пул ключей DeepSeek
+    keys_str = os.getenv("DEEPSEEK_API_KEYS", "")
+    if keys_str:
+        keys = [k.strip() for k in keys_str.split(",") if k.strip()]
+    else:
+        keys = [
+            os.getenv("DEEPSEEK_API_KEY"),
+            os.getenv("DEEPSEEK_API_KEY_SECONDARY")
+        ]
     keys = [k for k in keys if k and k.strip() and k != "your_deepseek_api_key_here"]
     
-    if not keys:
-        raise Exception("Отсутствуют API-ключи DeepSeek в конфигурации")
-        
     last_err = None
-    for i, key in enumerate(keys):
-        headers = {
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json"
-        }
-        try:
-            print(f"[DeepSeek] Попытка запроса с ключом #{i+1}...")
-            resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=timeout)
-            if resp.status_code == 200:
-                return resp
-            else:
-                last_err = f"HTTP {resp.status_code}: {resp.text}"
-                print(f"[DeepSeek] Ключ #{i+1} вернул ошибку: {last_err}")
-        except Exception as e:
-            last_err = str(e)
-            print(f"[DeepSeek] Ключ #{i+1} вызвал исключение: {last_err}")
-            
-    raise Exception(f"Все API-ключи DeepSeek вернули ошибку. Последняя ошибка: {last_err}")
+    if keys:
+        for i, key in enumerate(keys):
+            headers = {
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json"
+            }
+            try:
+                print(f"[API Router] Запрос к официальному DeepSeek (ключ #{i+1})...")
+                resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=timeout)
+                if resp.status_code == 200:
+                    return resp
+                else:
+                    last_err = f"HTTP {resp.status_code}: {resp.text}"
+                    print(f"[API Router] Ошибка ключа DeepSeek #{i+1}: {last_err}")
+            except Exception as e:
+                last_err = str(e)
+                print(f"[API Router] Сбой ключа DeepSeek #{i+1}: {last_err}")
+                
+    # 2. Если DeepSeek не сработал, пробуем OpenRouter
+    openrouter_keys_str = os.getenv("OPENROUTER_API_KEYS", "")
+    if openrouter_keys_str:
+        or_keys = [k.strip() for k in openrouter_keys_str.split(",") if k.strip()]
+    else:
+        or_keys = [os.getenv("OPENROUTER_API_KEY")]
+    or_keys = [k for k in or_keys if k and k.strip()]
+    
+    if or_keys:
+        print("[API Router] Переключение на резервный провайдер OpenRouter...")
+        or_payload = payload.copy()
+        or_payload["model"] = "deepseek/deepseek-chat"
+        for j, or_key in enumerate(or_keys):
+            headers = {
+                "Authorization": f"Bearer {or_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://sanarip.med.ai",
+                "X-Title": "Sanarip Med AI"
+            }
+            try:
+                print(f"[API Router] Запрос к OpenRouter (ключ #{j+1})...")
+                resp = requests.post("https://openrouter.ai/api/v1/chat/completions", json=or_payload, headers=headers, timeout=timeout)
+                if resp.status_code == 200:
+                    return resp
+                else:
+                    last_err = f"OpenRouter HTTP {resp.status_code}: {resp.text}"
+                    print(f"[API Router] Ошибка OpenRouter #{j+1}: {last_err}")
+            except Exception as e:
+                last_err = str(e)
+                print(f"[API Router] Сбой OpenRouter #{j+1}: {last_err}")
+                
+    raise Exception(f"Все API-ключи DeepSeek и OpenRouter вернули ошибку. Последняя ошибка: {last_err}")
 
 
 # Глобальный словарь соответствия симптомов специальностям врачей
@@ -680,10 +784,8 @@ def summarize_symptoms_with_llm(chat_id) -> str:
 
 
 def save_chat_history(chat_id):
-    """Сохраняет историю диалога пользователя на диск для панели разработчика"""
+    """Сохраняет историю диалога пользователя в базу данных для панели разработчика"""
     import time
-    os.makedirs(os.path.join(BASE_DIR, "data", "chat_histories"), exist_ok=True)
-    file_path = os.path.join(BASE_DIR, "data", "chat_histories", f"{chat_id}.json")
     history = USER_SESSIONS.get(chat_id, [])
     
     # Пытаемся получить имя из состояния, если оно там есть
@@ -692,20 +794,19 @@ def save_chat_history(chat_id):
         name = USER_STATES[chat_id]["name"]
         
     try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump({
-                "chat_id": chat_id,
-                "name": name,
-                "history": history,
-                "last_updated": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "usage_stats": USER_TOKEN_USAGE.get(chat_id, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
-            }, f, ensure_ascii=False, indent=2)
+        set_chat_history(chat_id, {
+            "chat_id": chat_id,
+            "name": name,
+            "history": history,
+            "last_updated": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "usage_stats": USER_TOKEN_USAGE.get(chat_id, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+        })
     except Exception as e:
         print(f"Ошибка сохранения истории чата {chat_id}: {e}")
 
 
 def save_emergency_request(chat_id, state_data):
-    """Сохраняет новую заявку скорой помощи в JSON файл и отправляет подтверждение"""
+    """Сохраняет новую заявку скорой помощи в базу данных и отправляет подтверждение"""
     import datetime
     
     request_entry = {
@@ -718,22 +819,10 @@ def save_emergency_request(chat_id, state_data):
         "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     
-    file_path = os.path.join(BASE_DIR, "data", "emergency_requests.json")
-    data = {"requests": []}
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                json.load(f)
-        except Exception as e:
-            print(f"Ошибка чтения заявок: {e}")
-            
-    data.setdefault("requests", []).append(request_entry)
-    
     try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        db_save_emergency_request(chat_id, request_entry)
     except Exception as e:
-        print(f"Ошибка сохранения заявки: {e}")
+        print(f"Ошибка сохранения заявки в БД: {e}")
         
     USER_STATES.pop(chat_id, None)
     
@@ -787,7 +876,7 @@ def save_emergency_request(chat_id, state_data):
 
 
 def save_home_doctor_request(chat_id, state_data):
-    """Сохраняет новую заявку вызова врача на дом в JSON файл и отправляет подтверждение"""
+    """Сохраняет заявку на вызов врача на дом в базу данных и отправляет подтверждение"""
     import datetime
     
     request_entry = {
@@ -797,151 +886,41 @@ def save_home_doctor_request(chat_id, state_data):
         "region": state_data.get("region", "Не указано"),
         "location": state_data.get("location", "Не указано"),
         "symptoms": state_data.get("symptoms", "Не указано"),
-        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
-    
-    file_path = os.path.join(BASE_DIR, "data", "home_doctor_requests.json")
-    data = {"requests": []}
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception as e:
-            print(f"Ошибка чтения заявок врача на дом: {e}")
-            
-    data.setdefault("requests", []).append(request_entry)
-    
-    try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Ошибка сохранения заявки врача на дом: {e}")
-        
-    USER_STATES.pop(chat_id, None)
-    
-    confirmation_text = (
-        "🏠 **Ваш вызов врача на дом успешно зарегистрирован!**\n\n"
-        "Мы передали следующую информацию дежурному врачу:\n"
-        f"👤 **Пациент:** {request_entry['name']}\n"
-        f"📞 **Телефон:** {request_entry['phone']}\n"
-        f"🏙️ **Район:** {request_entry['region']}\n"
-        f"📍 **Адрес:** {request_entry['location']}\n"
-        f"🩺 **Описанные симптомы:** {request_entry['symptoms']}\n\n"
-        "Врач свяжется с вами по указанному телефону для уточнения деталей визита. Пожалуйста, оставайтесь на связи."
-    )
-    send_message_safe(chat_id, confirmation_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
-
-    # Генерируем пошаговые рекомендации до прихода врача на дом
-    bot.send_chat_action(chat_id, 'typing')
-    
-    prompt_deepseek = (
-        f"Пользователь успешно оформил вызов врача на дом. Симптомы: '{request_entry['symptoms']}'. "
-        "Проанализируй историю диалога и напиши пошаговые рекомендации до прихода врача на дом "
-        "(что делать и чего делать категорически нельзя). "
-        "Пиши кратко, успокаивающе и по делу. В конце НЕ предлагай никаких текстовых кнопок и тегов [Кнопки: ...]."
-    )
-    
-    history = USER_SESSIONS.get(chat_id, [])
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    messages.extend(history)
-    messages.append({"role": "user", "content": prompt_deepseek})
-    
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": messages,
-        "temperature": 0.4,
+        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "type": "home_doctor"
     }
     
     try:
-        resp = requests_post_deepseek(payload, timeout=15)
-        aid_reply = resp.json()["choices"][0]["message"]["content"]
+        db_save_emergency_request(chat_id, request_entry)
     except Exception as e:
-        print(f"Ошибка генерации рекомендаций до прихода врача на дом: {e}")
-        aid_reply = (
-            "📋 **Рекомендации до прихода врача:**\n\n"
-            "1. Подготовьте паспорт или свидетельство о рождении пациента.\n"
-            "2. Обеспечьте удобное положение в постели, исключите физические нагрузки.\n"
-            "3. Регулярно проветривайте комнату.\n"
-            "❌ Не принимайте обезболивающие препараты до осмотра, если болит живот (это может затруднить диагностику)."
-        )
+        print(f"Ошибка сохранения вызова в БД: {e}")
         
-    send_message_safe(chat_id, aid_reply, parse_mode="Markdown")
-
-
 def save_appointment_request(chat_id, state_data):
-    """Сохраняет новую запись к врачу или в лабораторию в appointments.json"""
+    """Сохраняет новую запись к врачу или в лабораторию в базу данных"""
     import datetime
+    
+    # Генерируем уникальный ID для записи
     import uuid
-    
-    # Пытаемся обобщить симптомы с ИИ
-    symptoms = summarize_symptoms_with_llm(chat_id)
-    if symptoms == "Симптомы не описаны" and state_data.get("specialty") == "лаборатория":
-        symptoms = "Профилактический чекап / сдача анализов"
-        
-    # Определяем приоритет
-    priority = "Низкий"
-    symptoms_lower = symptoms.lower()
-    urgent_keywords = ["боль", "острая", "травма", "перелом", "сильная", "кровь", "температура", "задыхаюсь", "плохо"]
-    medium_keywords = ["кашель", "насморк", "болит", "дискомфорт", "сыпь", "слабость"]
-    
-    if any(k in symptoms_lower for k in urgent_keywords):
-        priority = "Высокий"
-    elif any(k in symptoms_lower for k in medium_keywords):
-        priority = "Средний"
-        
-    if state_data.get("specialty") == "лаборатория" and priority == "Высокий":
-        priority = "Средний"
-        
-    request_id = str(uuid.uuid4())[:8]
+    appointment_id = str(uuid.uuid4())[:8]
     
     appointment = {
-        "id": request_id,
+        "id": appointment_id,
         "chat_id": chat_id,
-        "clinic_id": state_data.get("clinic_id"),
-        "clinic_name": state_data.get("clinic_name"),
-        "clinic_type": state_data.get("clinic_type", "clinic"),
-        "patient_name": state_data.get("patient_name"),
-        "phone": state_data.get("phone"),
-        "symptoms": symptoms,
-        "specialty": state_data.get("specialty", "терапевт"),
-        "priority": priority,
-        "status": "pending",
-        "doctor_fio": "",
-        "appointment_time": "",
+        "name": state_data.get("name", "Не указано"),
+        "phone": state_data.get("phone", "Не указано"),
+        "specialty": state_data.get("specialty", "Не указано"),
+        "clinic_id": state_data.get("clinic_id", "Не указано"),
+        "clinic_name": state_data.get("clinic_name", "Не указано"),
+        "doctor_name": state_data.get("doctor_name", "Не указано"),
+        "status": "pending",  # pending, accepted, rejected
         "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     
-    file_path = os.path.join(BASE_DIR, "data", "appointments.json")
-    db_data = {"appointments": []}
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                db_data = json.load(f)
-        except Exception as e:
-            print(f"Ошибка чтения базы записей: {e}")
-            
-    db_data.setdefault("appointments", []).append(appointment)
-    
     try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(db_data, f, ensure_ascii=False, indent=2)
+        db_save_appointment(chat_id, appointment)
     except Exception as e:
         print(f"Ошибка сохранения записи: {e}")
         
-    # Очищаем состояние
-    USER_STATES.pop(chat_id, None)
-    save_json_state(STATES_FILE, USER_STATES)
-    
-    # Отправляем подтверждение пациенту
-    wait_time = "в течение часа" if priority == "Высокий" else "в течение дня"
-    confirm_text = (
-        "✅ **Заявка на запись успешно отправлена!**\n\n"
-        f"Клиника/лаборатория **{appointment['clinic_name']}** свяжется с вами для подтверждения записи.\n"
-        f"Пожалуйста, ожидайте уведомления здесь в чате ({wait_time}). Мы сообщим вам ФИО врача, дату и точное время приёма."
-    )
-    send_message_safe(chat_id, confirm_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
-
-
 def transcribe_voice_with_groq(file_bytes: bytes) -> str:
     """Транскрибация аудио-файла голоса через Groq Whisper API (поддерживает кыргызский, русский и английский)"""
     if not GROQ_API_KEY or GROQ_API_KEY == "your_groq_api_key_here":
@@ -971,48 +950,95 @@ def transcribe_voice_with_groq(file_bytes: bytes) -> str:
         return ""
 
 
-def analyze_image_with_groq(image_bytes: bytes) -> str:
-    """Отправка изображения в Groq Cloud Vision API (Llama-3.2 Vision)"""
-    if not GROQ_API_KEY or GROQ_API_KEY == "your_groq_api_key_here":
-        return "Ошибка конфигурации: отсутствует ключ GROQ_API_KEY."
-
+def analyze_image_with_gemini(image_bytes: bytes) -> str:
+    """Резервный анализ изображений через API Google Gemini 1.5/2.0 Flash"""
+    gemini_keys_str = os.getenv("GEMINI_API_KEYS", "")
+    if gemini_keys_str:
+        keys = [k.strip() for k in gemini_keys_str.split(",") if k.strip()]
+    else:
+        keys = [os.getenv("GEMINI_API_KEY")]
+    keys = [k for k in keys if k and k.strip()]
+    
+    if not keys:
+        return None
+        
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
     
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    payload = {
-        "model": GROQ_VISION_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": VISION_PROMPT},
+    for key in keys:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}"
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": VISION_PROMPT},
                     {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{base64_image}"
+                        "inlineData": {
+                            "mimeType": "image/jpeg",
+                            "data": base64_image
                         }
                     }
                 ]
-            }
-        ],
-        "temperature": 0.5,
-        "max_tokens": 1024
-    }
-    
-    try:
-        resp = requests.post(GROQ_URL, json=payload, headers=headers, timeout=30)
-        if resp.status_code != 200:
-            print(f"Ошибка от Groq API: {resp.status_code} {resp.text}")
-            return "Не удалось распознать изображение. Пожалуйста, сделайте новую фотографию, желательно при хорошем освещении и более четко."
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
-    except Exception as e:
-        print(f"Ошибка Groq Vision: {e}")
-        return "Извините, произошла ошибка. Пожалуйста, сделайте новую фотографию, но более четкую и при хорошем освещении."
+            }]
+        }
+        headers = {"Content-Type": "application/json"}
+        try:
+            print("[Gemini Router] Попытка запроса к Gemini Flash Vision...")
+            resp = requests.post(url, json=payload, headers=headers, timeout=20)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data["candidates"][0]["content"]["parts"][0]["text"]
+            else:
+                print(f"[Gemini Router] Ошибка Gemini: {resp.status_code} {resp.text}")
+        except Exception as e:
+            print(f"[Gemini Router] Исключение при запросе к Gemini: {e}")
+    return None
+
+
+def analyze_image_with_groq(image_bytes: bytes) -> str:
+    """Отправка изображения в Groq Cloud Vision API (Llama-3.2 Vision) с фолбэком на Gemini"""
+    # Пробуем Groq если есть ключ
+    if GROQ_API_KEY and GROQ_API_KEY != "your_groq_api_key_here":
+        base64_image = base64.b64encode(image_bytes).decode('utf-8')
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": GROQ_VISION_MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": VISION_PROMPT},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            "temperature": 0.5,
+            "max_tokens": 1024
+        }
+        try:
+            print("[Groq Router] Попытка запроса к Groq Vision...")
+            resp = requests.post(GROQ_URL, json=payload, headers=headers, timeout=30)
+            if resp.status_code == 200:
+                return resp.json()["choices"][0]["message"]["content"]
+            else:
+                print(f"[Groq Router] Ошибка Groq API: {resp.status_code} {resp.text}")
+        except Exception as e:
+            print(f"[Groq Router] Сбой Groq: {e}")
+
+    # Фолбэк на Gemini
+    print("[API Router] ВНИМАНИЕ: Переключение на резервный Gemini Flash Vision...")
+    gemini_reply = analyze_image_with_gemini(image_bytes)
+    if gemini_reply:
+        return gemini_reply
+
+    return "Не удалось распознать изображение. Пожалуйста, сделайте новую фотографию, желательно при хорошем освещении и более четко."
+
 
 def is_offtopic_text(text: str) -> bool:
     if not text.strip():
@@ -1051,6 +1077,20 @@ def _handle_callback_logic(call):
     chat_id = call.message.chat.id
     if chat_id in USER_BLOCKED:
         bot.answer_callback_query(call.id, "Диалог остановлен. Вы заблокированы за оффтоп.")
+        return
+
+    if call.data == "view_offer":
+        bot.answer_callback_query(call.id, "Загружаю оферту...")
+        pdf_path = os.path.join(BASE_DIR, "Sanarip_Med_AI_Public_Offer.pdf")
+        if os.path.exists(pdf_path):
+            try:
+                with open(pdf_path, 'rb') as doc:
+                    bot.send_document(chat_id, doc, caption="📄 Публичная оферта Санарип Мед AI")
+            except Exception as e:
+                print(f"Ошибка отправки оферты: {e}")
+                bot.send_message(chat_id, "Извините, не удалось загрузить файл оферты. Пожалуйста, попробуйте позже.")
+        else:
+            bot.send_message(chat_id, "Файл оферты временно недоступен.")
         return
 
     if call.data == "accept_disclaimer":
@@ -1360,14 +1400,110 @@ def _handle_callback_logic(call):
             send_message_safe(chat_id, reply, reply_markup=markup, parse_mode='Markdown')
 def send_disclaimer(chat_id):
     disclaimer_text = (
-        "⚖️ **Важная информация перед началом**\n\n"
-        "Санарип — это ИИ-помощник для первичной оценки симптомов и поиска врачей. Бот не ставит окончательные диагнозы, не назначает лечение и не заменяет очную консультацию врача.\n\n"
-        "Нажимая кнопку ниже, вы соглашаетесь с тем, что бот носит исключительно справочный характер, и вы берете на себя полную ответственность за любые свои дальнейшие действия и решения, связанные со здоровьем."
+        "⚖️ **Пользовательское соглашение и оферта**\n\n"
+        "Для продолжения работы, пожалуйста, ознакомьтесь с правилами ИИ-ассистента Санарип.\n\n"
+        "Нажимая кнопку ниже, вы подтверждаете своё согласие с **Публичной офертой** и даёте безусловное согласие на **обработку и трансграничную передачу обезличенных данных** (ID чата, текст сообщений) на серверы бота согласно Закону КР «Об информации персонального характера».\n\n"
+        "Бот носит исключительно справочно-ознакомительный характер, не ставит диагнозы, не назначает лечение и не заменяет визит к врачу. В экстренных случаях немедленно звоните 103!"
     )
-    markup = types.InlineKeyboardMarkup()
-    btn = types.InlineKeyboardButton("Я согласен(на)", callback_data="accept_disclaimer")
-    markup.add(btn)
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    btn_accept = types.InlineKeyboardButton("🤝 Принимаю условия и оферту", callback_data="accept_disclaimer")
+    btn_view = types.InlineKeyboardButton("📄 Посмотреть оферту", callback_data="view_offer")
+    markup.add(btn_accept, btn_view)
     bot.send_message(chat_id, disclaimer_text, reply_markup=markup, parse_mode='Markdown')
+
+
+# --- Системы Безопасности и защиты ИИ-агента ---
+import re
+import html
+import redis
+
+# Инициализация Redis для Rate-limiting
+redis_client = None
+try:
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    redis_client = redis.from_url(redis_url, socket_timeout=1)
+    print("[Redis] Успешно подключено для Rate-limiting")
+except Exception as e:
+    print(f"[Redis] Ошибка подключения к Redis: {e}. Будет использована локальная память.")
+
+# Локальный Rate-limiting fallback
+MEMORY_RATE_LIMITS = {}
+
+def is_rate_limited(chat_id: int) -> bool:
+    """Проверяет лимит запросов (максимум 10 сообщений в минуту)"""
+    import time
+    now = time.time()
+    limit = 10
+    window = 60
+    
+    if redis_client:
+        try:
+            key = f"ratelimit:{chat_id}"
+            pipe = redis_client.pipeline()
+            pipe.rpush(key, now)
+            pipe.expire(key, window)
+            pipe.lrange(key, 0, -1)
+            results = pipe.execute()
+            timestamps = results[2]
+            
+            valid_timestamps = [float(t) for t in timestamps if now - float(t) < window]
+            if len(valid_timestamps) != len(timestamps):
+                redis_client.delete(key)
+                if valid_timestamps:
+                    redis_client.rpush(key, *valid_timestamps)
+                    redis_client.expire(key, window)
+            
+            if len(valid_timestamps) > limit:
+                return True
+            return False
+        except Exception as e:
+            print(f"[Redis] Ошибка rate-limit: {e}")
+            
+    # Fallback на RAM
+    timestamps = MEMORY_RATE_LIMITS.get(chat_id, [])
+    timestamps = [t for t in timestamps if now - t < window]
+    timestamps.append(now)
+    MEMORY_RATE_LIMITS[chat_id] = timestamps
+    return len(timestamps) > limit
+
+def sanitize_user_input(text: str) -> str:
+    """Защита от XSS и очистка тегов, ограничение длины"""
+    if not text:
+        return ""
+    if len(text) > 1000:
+        text = text[:1000] + "... [Текст обрезан из соображений безопасности]"
+    text = re.sub(r'<[^>]*>', '', text)
+    text = html.escape(text)
+    return text
+
+def check_prompt_injection(text: str) -> bool:
+    """Проверка на попытки джейлбрейка и инъекций промптов"""
+    lower_text = text.lower()
+    keywords = [
+        "игнорируй предыдущие инструкции",
+        "игнорируй все предыдущие",
+        "отключи безопасный режим",
+        "системный промпт",
+        "system prompt",
+        "developer mode",
+        "ignore all previous instructions",
+        "forget your rules",
+        "забудь свои правила",
+        "действуй как",
+        "act as a",
+        "ты теперь не"
+    ]
+    for kw in keywords:
+        if kw in lower_text:
+            return True
+    return False
+
+def anonymize_pii(text: str) -> str:
+    """Анонимизация PII (почты, телефоны) перед отправкой внешним провайдерам"""
+    text = re.sub(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', '[EMAIL_REDACTED]', text)
+    text = re.sub(r'\+?\b\d[\d\s-]{8,14}\b', '[PHONE_REDACTED]', text)
+    return text
+
 
 # --- Командные обработчики ---
 
@@ -1403,8 +1539,17 @@ def handle_text(message):
     chat_id = message.chat.id
     if check_session_timeout(chat_id):
         return
+        
+    # 1. Проверка Rate-limit
+    if is_rate_limited(chat_id):
+        bot.reply_to(message, "⚠️ Вы отправляете сообщения слишком часто. Пожалуйста, подождите немного.")
+        return
+
     load_chat_history(chat_id)
-    text = message.text.strip()
+    
+    # 2. Ограничение длины и XSS санитаризация
+    raw_text = message.text.strip() if message.text else ""
+    sanitized_text = sanitize_user_input(raw_text)
     
     if chat_id not in USER_ACCEPTED_DISCLAIMER:
         send_disclaimer(chat_id)
@@ -1413,8 +1558,15 @@ def handle_text(message):
     if chat_id in USER_BLOCKED:
         return
 
-    # Проверка, заполняет ли пользователь форму скорой помощи
+    # Проверка, заполняет ли пользователь форму
     if chat_id in USER_STATES:
+        text = sanitized_text # Используем санитаризованный текст для форм, не обрезая PII
+    else:
+        # Для общего чата с ИИ проверяем на инъекции и вырезаем PII
+        if check_prompt_injection(raw_text):
+            bot.reply_to(message, "⚠️ Обнаружена попытка некорректного запроса. Пожалуйста, задавайте вопросы только по теме здоровья.")
+            return
+        text = anonymize_pii(sanitized_text)
         state_data = USER_STATES[chat_id]
         current_state = state_data.get("state")
 
@@ -1605,6 +1757,10 @@ def handle_voice(message):
     chat_id = message.chat.id
     if check_session_timeout(chat_id):
         return
+    if is_rate_limited(chat_id):
+        bot.reply_to(message, "⚠️ Вы отправляете сообщения слишком часто. Пожалуйста, подождите немного.")
+        return
+
     if chat_id not in USER_ACCEPTED_DISCLAIMER:
         send_disclaimer(chat_id)
         return

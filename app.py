@@ -9,6 +9,7 @@ load_dotenv()
 # Импортируем бота для работы через вебхуки на Vercel
 import telebot
 from telegram_bot import bot, send_message_safe
+from database import get_all_appointments, get_all_emergency_requests, update_appointment_status
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
@@ -96,14 +97,11 @@ def dashboard():
     import os
     
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    file_path = os.path.join(BASE_DIR, "data", "emergency_requests.json")
-    requests_list = []
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                requests_list = json.load(f).get("requests", [])
-        except Exception as e:
-            print(f"Error reading requests: {e}")
+    try:
+        requests_list = get_all_emergency_requests()
+    except Exception as e:
+        print(f"Error reading requests from DB: {e}")
+        requests_list = []
             
     districts = {
         "Ленинский": [],
@@ -924,6 +922,39 @@ def telegram_webhook():
         print("LOG: Unsupported Media Type", file=sys.stderr)
         return 'Unsupported Media Type', 403
 
+@app.route("/webhook/whatsapp/local", methods=["POST"])
+def whatsapp_local_webhook():
+    """Прием сообщений от локального WhatsApp-моста на Baileys"""
+    from telegram_bot import ask_deepseek_with_history, get_relevant_context, load_chat_history
+    
+    data = request.json
+    if not data:
+        return jsonify({"error": "No data received"}), 400
+        
+    phone = data.get("phone")
+    name = data.get("name")
+    text = data.get("text")
+    
+    if not phone or not text:
+        return jsonify({"error": "phone and text are required"}), 400
+        
+    # Превращаем телефон в уникальный целочисленный chat_id для истории сессий
+    try:
+        chat_id = int(phone)
+    except ValueError:
+        chat_id = phone
+        
+    # Загружаем историю
+    load_chat_history(chat_id)
+    
+    # Ищем контекст в RAG
+    context, _ = get_relevant_context(text)
+    
+    # Отправляем запрос к ИИ
+    reply, _ = ask_deepseek_with_history(chat_id, text, context)
+    
+    return jsonify({"text": reply}), 200
+
 @app.route("/set_webhook", methods=["GET"])
 def set_webhook():
     """Автоматическая настройка вебхука Telegram на текущий хост"""
@@ -959,15 +990,12 @@ def clinic_dashboard():
         
     active_clinic = next((c for c in clinics_list if c.get("id") == active_clinic_id), None)
     
-    # 2. Загружаем все записи (appointments)
-    appointments_file = os.path.join(BASE_DIR, "data", "appointments.json")
-    appointments_list = []
-    if os.path.exists(appointments_file):
-        try:
-            with open(appointments_file, "r", encoding="utf-8") as f:
-                appointments_list = json.load(f).get("appointments", [])
-        except Exception as e:
-            print(f"Error reading appointments: {e}")
+    # 2. Загружаем все записи (appointments) из БД
+    try:
+        appointments_list = get_all_appointments()
+    except Exception as e:
+        print(f"Error reading appointments from DB: {e}")
+        appointments_list = []
             
     # Фильтруем записи по выбранной клинике
     clinic_appointments = [a for a in appointments_list if a.get("clinic_id") == active_clinic_id]
@@ -1473,30 +1501,15 @@ def accept_appointment():
     clinic_address = clinic.get("address", "Бишкек") if clinic else "Бишкек"
     clinic_phone = clinic.get("phone", "") if clinic else ""
     
-    # 2. Обновляем статус записи
-    appointments_list = []
-    if os.path.exists(appointments_file):
-        try:
-            with open(appointments_file, "r", encoding="utf-8") as f:
-                appointments_list = json.load(f).get("appointments", [])
-        except:
-            pass
-            
-    target_appt = None
-    for appt in appointments_list:
-        if appt.get("id") == appointment_id:
-            appt["status"] = "accepted"
-            appt["doctor_fio"] = doctor_fio
-            appt["appointment_time"] = appointment_time
-            target_appt = appt
-            break
-            
-    if target_appt:
-        try:
-            with open(appointments_file, "w", encoding="utf-8") as f:
-                json.dump({"appointments": appointments_list}, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"Error saving appointments: {e}")
+    # 2. Обновляем статус записи в БД
+    try:
+        update_appointment_status(appointment_id, "accepted", doctor_fio, appointment_time)
+        # Получаем информацию о записи для уведомления пациента
+        appointments_list = get_all_appointments()
+        target_appt = next((a for a in appointments_list if a.get("id") == appointment_id), None)
+    except Exception as e:
+        print(f"Error updating appointment status: {e}")
+        target_appt = None
             
         # 3. Отправляем уведомление пациенту в Telegram
         chat_id = target_appt.get("chat_id")
