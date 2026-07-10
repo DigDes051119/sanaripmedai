@@ -994,14 +994,16 @@ def analyze_image_with_gemini(image_bytes: bytes) -> str:
 
 
 def analyze_image_with_groq(image_bytes: bytes) -> str:
-    """Отправка изображения в Groq Cloud Vision API (Llama-3.2 Vision) с фолбэком на Gemini"""
-    # Пробуем Groq если есть ключ
-    if GROQ_API_KEY and GROQ_API_KEY != "your_groq_api_key_here":
+    """Отправка изображения в Groq Cloud Vision API (Llama-3.2 Vision) с фолбэком на Gemini и ротацией ключей"""
+    groq_keys_str = os.getenv("GROQ_API_KEYS", "")
+    if groq_keys_str:
+        keys = [k.strip() for k in groq_keys_str.split(",") if k.strip()]
+    else:
+        keys = [GROQ_API_KEY]
+    keys = [k for k in keys if k and k.strip() and k != "your_groq_api_key_here"]
+
+    if keys:
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
-        headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json"
-        }
         payload = {
             "model": GROQ_VISION_MODEL,
             "messages": [
@@ -1021,15 +1023,20 @@ def analyze_image_with_groq(image_bytes: bytes) -> str:
             "temperature": 0.5,
             "max_tokens": 1024
         }
-        try:
-            print("[Groq Router] Попытка запроса к Groq Vision...")
-            resp = requests.post(GROQ_URL, json=payload, headers=headers, timeout=30)
-            if resp.status_code == 200:
-                return resp.json()["choices"][0]["message"]["content"]
-            else:
-                print(f"[Groq Router] Ошибка Groq API: {resp.status_code} {resp.text}")
-        except Exception as e:
-            print(f"[Groq Router] Сбой Groq: {e}")
+        for i, key in enumerate(keys):
+            headers = {
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json"
+            }
+            try:
+                print(f"[Groq Router] Попытка запроса к Groq Vision (ключ #{i+1})...")
+                resp = requests.post(GROQ_URL, json=payload, headers=headers, timeout=30)
+                if resp.status_code == 200:
+                    return resp.json()["choices"][0]["message"]["content"]
+                else:
+                    print(f"[Groq Router] Ошибка Groq API (ключ #{i+1}): {resp.status_code} {resp.text}")
+            except Exception as e:
+                print(f"[Groq Router] Сбой Groq (ключ #{i+1}): {e}")
 
     # Фолбэк на Gemini
     print("[API Router] ВНИМАНИЕ: Переключение на резервный Gemini Flash Vision...")
