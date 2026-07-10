@@ -7,5 +7,11 @@ diff_output.txt
 node_modules/
 package-lock.json
 
-# Local data cache
-data/
+# Личные данные пользователей (не загружать в Git)
+data/chat_histories/
+data/emergency_requests.json
+data/user_states.json
+data/user_accepted_disclaimer.json
+data/user_offtopic_count.json
+data/user_blocked.json
+data/user_last_activity.json

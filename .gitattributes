@@ -1,2 +1,4 @@
 *.pdf filter=lfs diff=lfs merge=lfs -text
 Sanarip[[:space:]]Med[[:space:]]AI[[:space:]]план[[:space:]]реализации[[:space:]]MVP.pdf filter=lfs diff=lfs merge=lfs -text
+data/*.json filter=lfs diff=lfs merge=lfs -text
+data/**/*.json filter=lfs diff=lfs merge=lfs -text
