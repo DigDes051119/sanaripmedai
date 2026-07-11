@@ -15,3 +15,8 @@ data/user_accepted_disclaimer.json
 data/user_offtopic_count.json
 data/user_blocked.json
 data/user_last_activity.json
+
+# Raw knowledge base source directories (large count of files, indexed into diseases_index.json)
+data/diseases_kb/
+data/professions_kb/
+
