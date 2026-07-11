@@ -10,6 +10,8 @@ import telebot
 from telebot import types
 from dotenv import load_dotenv
 from rag_updater import SimpleTFIDFIndex, start_background_updater
+from qdrant_client import QdrantClient
+
 
 # ─── Round-Robin счётчики (thread-safe) ───────────────────────────────────────
 _rr_lock = threading.Lock()
@@ -31,6 +33,41 @@ def _rr_next(counter_name: str, pool_size: int) -> int:
             idx = _rr_gemini_idx % pool_size
             _rr_gemini_idx += 1
     return idx
+
+def _get_gemini_query_embedding(query_text: str) -> list:
+    """Генерирует вектор эмбеддинга для вопроса пользователя через API Gemini с ротацией ключей"""
+    gemini_keys_str = os.getenv("GEMINI_API_KEYS", "")
+    if gemini_keys_str:
+        keys = [k.strip() for k in gemini_keys_str.split(",") if k.strip()]
+    else:
+        keys = [os.getenv("GEMINI_API_KEY")]
+    
+    keys = [k for k in keys if k and k.strip()]
+    if not keys:
+        print("[Embedding] Error: Нет доступных ключей GEMINI_API_KEYS")
+        return None
+        
+    start_idx = _rr_next('gemini', len(keys))
+    for i in range(len(keys)):
+        idx = (start_idx + i) % len(keys)
+        api_key = keys[idx]
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key={api_key}"
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "model": "models/gemini-embedding-001",
+            "content": {"parts": [{"text": query_text[:3000]}]}
+        }
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=8)
+            if resp.status_code == 200:
+                return resp.json()["embedding"]["values"]
+            elif resp.status_code == 429:
+                print(f"[Embedding API] Rate limit 429 на ключе #{idx+1}. Пауза 5 сек...")
+                time.sleep(5)
+        except Exception as e:
+            print(f"[Embedding API] Ошибка запроса на ключе #{idx+1}: {e}")
+    return None
+
 
 # ─── Redis-клиент (семантический кэш) ─────────────────────────────────────────
 try:
@@ -432,21 +469,34 @@ DISEASES_INDEX = None
 try:
     if os.path.exists(DISEASES_INDEX_PATH):
         DISEASES_INDEX = SimpleTFIDFIndex.load(DISEASES_INDEX_PATH)
-        print("RAG база знаний заболеваний успешно загружена.")
+        print("RAG база знаний заболеваний (TF-IDF) успешно загружена.")
     else:
-        print("Внимание: RAG база знаний заболеваний не найдена.")
+        print("Внимание: RAG база знаний заболеваний (TF-IDF) не найдена.")
 except Exception as e:
-    print(f"Ошибка загрузки RAG базы знаний заболеваний: {e}")
+    print(f"Ошибка загрузки RAG базы знаний заболеваний (TF-IDF): {e}")
 
 PROFESSIONS_INDEX = None
 try:
     if os.path.exists(PROFESSIONS_INDEX_PATH):
         PROFESSIONS_INDEX = SimpleTFIDFIndex.load(PROFESSIONS_INDEX_PATH)
-        print("RAG база знаний профессий успешно загружена.")
+        print("RAG база знаний профессий (TF-IDF) успешно загружена.")
     else:
-        print("Внимание: RAG база знаний профессий не найдена.")
+        print("Внимание: RAG база знаний профессий (TF-IDF) не найдена.")
 except Exception as e:
-    print(f"Ошибка загрузки RAG базы знаний профессий: {e}")
+    print(f"Ошибка загрузки RAG базы знаний профессий (TF-IDF): {e}")
+
+# Инициализация векторной базы данных Qdrant
+QDRANT_CLIENT = None
+QDRANT_DB_PATH = os.path.join(BASE_DIR, "data", "qdrant_db_new")
+try:
+    if os.path.exists(QDRANT_DB_PATH):
+        QDRANT_CLIENT = QdrantClient(path=QDRANT_DB_PATH)
+        print("Векторная база знаний Qdrant успешно подключена.")
+    else:
+        print("Внимание: Векторная база знаний Qdrant не найдена. Будет использоваться TF-IDF.")
+except Exception as e:
+    print(f"Ошибка инициализации Qdrant: {e}")
+
 
 # Запускаем фоновый апдейтер только если мы НЕ на Vercel и НЕ на PythonAnywhere
 if "VERCEL" not in os.environ and "PYTHONANYWHERE_DOMAIN" not in os.environ:
@@ -649,7 +699,31 @@ def ask_deepseek_with_history(chat_id: int, user_message: str, context: str = ""
     user_msgs = [m["content"] for m in history if m["role"] == "user"]
     search_query = " ".join(user_msgs[-3:]) if user_msgs else user_message
 
-    if DISEASES_INDEX:
+    query_vector = None
+    if QDRANT_CLIENT:
+        try:
+            query_vector = _get_gemini_query_embedding(search_query)
+            if query_vector:
+                search_results = QDRANT_CLIENT.search(
+                    collection_name="diseases",
+                    query_vector=query_vector,
+                    limit=2
+                )
+                matching_docs = []
+                for hit in search_results:
+                    if hit.score > 0.40:
+                        matching_docs.append(
+                            f"Документ: {hit.payload['title']}\n"
+                            f"Ссылка: {hit.payload['url']}\n"
+                            f"Содержание:\n{hit.payload['content'][:2500]}"
+                        )
+                if matching_docs:
+                    rag_context = "=== ЛОКАЛЬНЫЕ КЛИНИЧЕСКИЕ ПРОТОКОЛЫ (RAG - Vector) ===\n\n" + "\n\n---\n\n".join(matching_docs)
+        except Exception as e:
+            print(f"Ошибка RAG поиска заболеваний в Qdrant: {e}")
+
+    # Fallback на TF-IDF для заболеваний, если векторный поиск не дал результатов
+    if not rag_context and DISEASES_INDEX:
         try:
             results = DISEASES_INDEX.search(search_query, top_k=2)
             matching_docs = []
@@ -661,13 +735,36 @@ def ask_deepseek_with_history(chat_id: int, user_message: str, context: str = ""
                         f"Содержание:\n{doc['content'][:2500]}"
                     )
             if matching_docs:
-                rag_context = "=== ЛОКАЛЬНЫЕ КЛИНИЧЕСКИЕ ПРОТОКОЛЫ (RAG) ===\n\n" + "\n\n---\n\n".join(matching_docs)
+                rag_context = "=== ЛОКАЛЬНЫЕ КЛИНИЧЕСКИЕ ПРОТОКОЛЫ (RAG - TF-IDF) ===\n\n" + "\n\n---\n\n".join(matching_docs)
         except Exception as e:
-            print(f"Ошибка RAG поиска заболеваний: {e}")
+            print(f"Ошибка RAG поиска заболеваний (TF-IDF): {e}")
 
     # Проводим RAG поиск по локальной базе медицинских профессий
     prof_context = ""
-    if PROFESSIONS_INDEX:
+    if QDRANT_CLIENT:
+        try:
+            if not query_vector:
+                query_vector = _get_gemini_query_embedding(search_query)
+            if query_vector:
+                search_results = QDRANT_CLIENT.search(
+                    collection_name="professions",
+                    query_vector=query_vector,
+                    limit=2
+                )
+                matching_docs = []
+                for hit in search_results:
+                    if hit.score > 0.40:
+                        matching_docs.append(
+                            f"Профессиональный профиль: {hit.payload['title']}\n"
+                            f"Содержание:\n{hit.payload['content']}"
+                        )
+                if matching_docs:
+                    prof_context = "=== СПРАВКА ПО МЕДИЦИНСКИМ ПРОФЕССИЯМ (RAG - Vector) ===\n\n" + "\n\n---\n\n".join(matching_docs)
+        except Exception as e:
+            print(f"Ошибка RAG поиска профессий в Qdrant: {e}")
+
+    # Fallback на TF-IDF для профессий
+    if not prof_context and PROFESSIONS_INDEX:
         try:
             results = PROFESSIONS_INDEX.search(search_query, top_k=2)
             matching_docs = []
@@ -678,9 +775,9 @@ def ask_deepseek_with_history(chat_id: int, user_message: str, context: str = ""
                         f"Содержание:\n{doc['content']}"
                     )
             if matching_docs:
-                prof_context = "=== СПРАВКА ПО МЕДИЦИНСКИМ ПРОФЕССИЯМ (RAG) ===\n\n" + "\n\n---\n\n".join(matching_docs)
+                prof_context = "=== СПРАВКА ПО МЕДИЦИНСКИМ ПРОФЕССИЯМ (RAG - TF-IDF) ===\n\n" + "\n\n---\n\n".join(matching_docs)
         except Exception as e:
-            print(f"Ошибка RAG поиска профессий: {e}")
+            print(f"Ошибка RAG поиска профессий (TF-IDF): {e}")
 
     # Объединяем контекст ключевых слов, RAG по заболеваниям и RAG по профессиям
     full_context = ""
