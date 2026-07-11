@@ -1,8 +1,9 @@
 #!/bin/bash
 
-# Запуск локального сервера Redis в фоновом режиме
+# Запуск локального сервера Redis в фоновом режиме (направляем пути в /tmp во избежание ошибок прав доступа на Hugging Face)
 echo "Запуск Redis-сервера..."
-redis-server --daemonize yes
+redis-server --daemonize yes --dir /tmp --dbfilename redis-dump.rdb --pidfile /tmp/redis-server.pid --logfile /tmp/redis.log
+
 
 # Проверка, что Redis запустился
 sleep 2
