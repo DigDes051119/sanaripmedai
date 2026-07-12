@@ -34,8 +34,9 @@ def _rr_next(counter_name: str, pool_size: int) -> int:
             _rr_gemini_idx += 1
     return idx
 
+
 def _get_gemini_query_embedding(query_text: str) -> list:
-    """Генерирует вектор эмбеддинга для вопроса пользователя через API Gemini с ротацией ключей"""
+    """Генерирует вектор эмбеддинга для вопроса пользователя через API Gemini с ротацией ключей (для RAG)"""
     gemini_keys_str = os.getenv("GEMINI_API_KEYS", "")
     if gemini_keys_str:
         keys = [k.strip() for k in gemini_keys_str.split(",") if k.strip()]
@@ -68,28 +69,34 @@ def _get_gemini_query_embedding(query_text: str) -> list:
             print(f"[Embedding API] Ошибка запроса на ключе #{idx+1}: {e}")
     return None
 
+_embedding_model = None
+_embedding_lock = threading.Lock()
 
-# ─── Redis-клиент (семантический кэш) ─────────────────────────────────────────
-try:
-    import redis as redis_lib
-    _redis = redis_lib.Redis(host='localhost', port=6379, db=0, decode_responses=True, socket_connect_timeout=2)
-    _redis.ping()
-    print("[Cache] Redis подключен успешно — семантический кэш активен.")
-except Exception as _redis_err:
-    _redis = None
-    print(f"[Cache] Redis недоступен ({_redis_err}) — работаем без кэша.")
+def _get_local_cache_embedding(query_text: str) -> list:
+    """Генерирует вектор эмбеддинга локально через sentence-transformers (rubert-tiny2) для семантического кэша"""
+    global _embedding_model
+    try:
+        from sentence_transformers import SentenceTransformer
+        with _embedding_lock:
+            if _embedding_model is None:
+                print("[Embedding Cache] Загрузка локальной модели rubert-tiny2...")
+                import torch
+                torch.set_num_threads(2)
+                _embedding_model = SentenceTransformer("cointegrated/rubert-tiny2")
+                print("[Embedding Cache] Локальная модель rubert-tiny2 загружена.")
+        
+        vector = _embedding_model.encode(query_text).tolist()
+        return vector
+    except Exception as e:
+        print(f"[Embedding Cache] Ошибка локальной генерации эмбеддинга: {e}")
+    return None
 
-SEMANTIC_CACHE_TTL = 86400        # 24 часа
-SEMANTIC_CACHE_THRESHOLD = float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.95"))
-
-SEMANTIC_CACHE_PREFIX = "sem_cache:"
 
 def _cache_get(question: str):
-    """Ищет похожий вопрос в Redis-кэше с помощью векторных эмбеддингов."""
+    """Ищет похожий вопрос в Redis-кэше с помощью локальных векторных эмбеддингов."""
     try:
         from semantic_cache import check_cache
-        # Получаем эмбеддинг вопроса через Gemini API
-        query_vector = _get_gemini_query_embedding(question)
+        query_vector = _get_local_cache_embedding(question)
         if not query_vector:
             return None
         return check_cache(query_vector)
@@ -98,15 +105,16 @@ def _cache_get(question: str):
     return None
 
 def _cache_set(question: str, answer: str):
-    """Сохраняет пару вопрос→ответ в Redis-кэш."""
+    """Сохраняет пару вопрос→ответ в Redis-кэш с использованием локальных эмбеддингов."""
     try:
         from semantic_cache import store_cache
-        query_vector = _get_gemini_query_embedding(question)
+        query_vector = _get_local_cache_embedding(question)
         if not query_vector:
             return
         store_cache(query_vector, answer)
     except Exception as e:
         print(f"[Cache] Ошибка записи векторного кэша: {e}")
+
 
 
 # Загружаем переменные окружения
