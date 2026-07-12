@@ -39,26 +39,41 @@ def test_telegram():
     except Exception as e:
         results["direct_api"] = f"Failed: {e}"
         
-    # 2. Тест Cloudflare Worker Proxy (таймаут 15 сек)
+    # 2. Тест Cloudflare Worker Proxy с разными заголовками и SSL-настройками
+    # Тест А: Обычный запрос (без User-Agent)
     try:
-        r = requests.get("https://fancy-mountain-f16b.sanaripmedai.workers.dev", timeout=15)
-        results["cloudflare_worker"] = f"Success (Status: {r.status_code})"
+        r = requests.get("https://fancy-mountain-f16b.sanaripmedai.workers.dev", timeout=10)
+        results["worker_default"] = f"Success (Status: {r.status_code})"
     except Exception as e:
-        results["cloudflare_worker"] = f"Failed: {e}"
+        results["worker_default"] = f"Failed: {e}"
         
-    # 2b. Тест публичного прокси Telegg.ru
+    # Тест Б: С браузерным User-Agent (обход блокировок роботов на Cloudflare)
     try:
-        r = requests.get("https://telegg.ru", timeout=15)
-        results["telegg_ru"] = f"Success (Status: {r.status_code})"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+        r = requests.get("https://fancy-mountain-f16b.sanaripmedai.workers.dev", headers=headers, timeout=10)
+        results["worker_with_user_agent"] = f"Success (Status: {r.status_code})"
     except Exception as e:
-        results["telegg_ru"] = f"Failed: {e}"
+        results["worker_with_user_agent"] = f"Failed: {e}"
         
-    # 2c. Тест публичного прокси tapi.chary.us
+    # Тест В: Форсирование TLS 1.2 (для устранения несовместимости OpenSSL и Cloudflare TLS 1.3)
     try:
-        r = requests.get("https://tapi.chary.us", timeout=15)
-        results["tapi_chary_us"] = f"Success (Status: {r.status_code})"
+        import ssl
+        class TLS12Adapter(requests.adapters.HTTPAdapter):
+            def init_poolmanager(self, *args, **kwargs):
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                context.minimum_version = ssl.TLSVersion.TLSv1_2
+                context.maximum_version = ssl.TLSVersion.TLSv1_2
+                kwargs['ssl_context'] = context
+                return super().init_poolmanager(*args, **kwargs)
+                
+        session = requests.Session()
+        session.mount("https://", TLS12Adapter())
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+        r = session.get("https://fancy-mountain-f16b.sanaripmedai.workers.dev", headers=headers, timeout=10)
+        results["worker_tls12_with_ua"] = f"Success (Status: {r.status_code})"
     except Exception as e:
-        results["tapi_chary_us"] = f"Failed: {e}"
+        results["worker_tls12_with_ua"] = f"Failed: {e}"
+
 
         
     # 3. Тест Google.com (для проверки общего интернета)
