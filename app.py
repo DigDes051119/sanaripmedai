@@ -6,10 +6,27 @@ from dotenv import load_dotenv
 # Загружаем переменные окружения
 load_dotenv()
 
-# Импортируем бота для работы через вебхуки на Vercel
-import telebot
-from telegram_bot import bot, send_message_safe
-from database import get_all_appointments, get_all_emergency_requests, update_appointment_status
+# Импортируем бота и базу данных с защитой от падений
+# (Flask должен запуститься, даже если какой-то импорт упал)
+init_errors = []
+
+try:
+    import telebot
+    from telegram_bot import bot, send_message_safe
+except Exception as e:
+    bot = None
+    send_message_safe = None
+    init_errors.append(f"telegram_bot import error: {e}")
+    print(f"[INIT ERROR] telegram_bot: {e}")
+
+try:
+    from database import get_all_appointments, get_all_emergency_requests, update_appointment_status
+except Exception as e:
+    get_all_appointments = lambda: []
+    get_all_emergency_requests = lambda: []
+    update_appointment_status = lambda a, s: None
+    init_errors.append(f"database import error: {e}")
+    print(f"[INIT ERROR] database: {e}")
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
