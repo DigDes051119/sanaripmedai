@@ -30,11 +30,28 @@ def webhook():
 @app.route("/test_telegram")
 def test_telegram():
     import requests
+    results = {}
+    
+    # 1. Тест прямого Telegram API
     try:
         r = requests.get("https://api.telegram.org", timeout=5)
-        return f"<h1>Telegram API Test</h1><p>Status Code: {r.status_code}</p><p>Response: Success</p>", 200
+        results["direct_api"] = f"Success (Status: {r.status_code})"
     except Exception as e:
-        return f"<h1>Telegram API Test</h1><p>Error: {e}</p>", 500
+        results["direct_api"] = f"Failed: {e}"
+        
+    # 2. Тест Cloudflare Worker Proxy
+    try:
+        r = requests.get("https://fancy-mountain-f16b.sanaripmedai.workers.dev", timeout=5)
+        results["cloudflare_worker"] = f"Success (Status: {r.status_code})"
+    except Exception as e:
+        results["cloudflare_worker"] = f"Failed: {e}"
+        
+    # Форматируем красивый вывод
+    html_output = "<h1>Диагностика сети Telegram API</h1>"
+    for name, res in results.items():
+        html_output += f"<p><b>{name}:</b> {res}</p>"
+    return html_output, 200
+
 
 def init_webhook():
     """Настройка вебхука Telegram бота в фоновом режиме"""
