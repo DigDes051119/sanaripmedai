@@ -78,8 +78,8 @@ EMERGENCY_FILE = os.path.join(DATA_DIR, "emergency_requests.json")
 def get_connection():
     if not DATABASE_URL:
         return None
-    retry_delay = 5
-    max_retries = 10
+    retry_delay = 2
+    max_retries = 5
     for attempt in range(1, max_retries + 1):
         try:
             conn = psycopg2.connect(DATABASE_URL)

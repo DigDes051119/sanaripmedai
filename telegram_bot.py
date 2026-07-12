@@ -499,11 +499,11 @@ except Exception as e:
 
 
 # Запускаем фоновый апдейтер только если мы НЕ на Vercel и НЕ на PythonAnywhere
-if "VERCEL" not in os.environ and "PYTHONANYWHERE_DOMAIN" not in os.environ:
+if "VERCEL" not in os.environ and "PYTHONANYWHERE_DOMAIN" not in os.environ and "SPACE_ID" not in os.environ:
     try:
         start_background_updater()
     except Exception as e:
-        print(f"Ошибка фоновой службы обновлений RAG: {e}")
+        print(f"[RAG] Background updater disabled on HF Space: {e}")
 
 
 # Системные промпты с профессиональным, успокаивающим тоном и строгими ограничениями
