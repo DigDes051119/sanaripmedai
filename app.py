@@ -1530,7 +1530,28 @@ def accept_appointment():
                 
     return redirect(f"/clinic_dashboard?clinic_id={clinic_id}")
 
+# ── Health check и sleep-пробудитель (HF free tier засыпает через 48 ч) ──
+@app.route("/health")
+def health():
+    return "OK", 200
+
+def keep_alive():
+    """Пингует сам себя каждые 47 часов, чтобы HF Space не засыпал."""
+    import time, threading, requests
+    def _ping():
+        while True:
+            time.sleep(47 * 3600)
+            try:
+                requests.get("http://localhost:7860/health", timeout=5)
+                print("[KeepAlive] Health check OK")
+            except Exception as e:
+                print(f"[KeepAlive] Ping failed: {e}")
+    t = threading.Thread(target=_ping, daemon=True)
+    t.start()
+
+if os.environ.get("SPACE_ID"):
+    keep_alive()
+
 if __name__ == "__main__":
-    # Запуск сервера
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)

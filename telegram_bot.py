@@ -80,7 +80,7 @@ except Exception as _redis_err:
     print(f"[Cache] Redis недоступен ({_redis_err}) — работаем без кэша.")
 
 SEMANTIC_CACHE_TTL = 86400        # 24 часа
-SEMANTIC_CACHE_THRESHOLD = 0.92   # сходство >= 92% → кэш
+SEMANTIC_CACHE_THRESHOLD = 0.95   # сходство >= 95% → кэш (difflib, не тратит API)
 SEMANTIC_CACHE_PREFIX = "sem_cache:"
 
 def _cache_get(question: str):
