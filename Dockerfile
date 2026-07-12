@@ -8,4 +8,4 @@ COPY . .
 EXPOSE 7860
 
 # Use Python's built-in HTTP server — no deps needed
-CMD ["python", "-u", "-m", "http.server", "7860"]
+CMD ["python", "-u", "server.py"]

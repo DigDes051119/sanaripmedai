@@ -1,18 +1,16 @@
-#!/usr/bin/env python3
-"""Minimal HTTP server using only stdlib — no Flask, no dependencies."""
-import http.server, os, sys
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import os
 
-class Handler(http.server.SimpleHTTPRequestHandler):
+class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b"<h1>Sanarip Med AI</h1><p>Works!</p>")
-    def log_message(self, fmt, *args):
-        sys.stderr.write("[HTTP] %s - %s\n" % (self.address_string(), fmt % args))
-        sys.stderr.flush()
+        self.wfile.write(b'OK, Sanarip Med AI is running!\n')
+    def log_message(self, format, *args):
+        print(f'{self.client_address[0]} - {format % args}')
 
-port = int(os.environ.get("PORT", 7860))
-sys.stderr.write("[STARTUP] Minimal server on 0.0.0.0:%d\n" % port)
-sys.stderr.flush()
-http.server.HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+port = int(os.environ.get('PORT', 7860))
+print(f'Starting server on port {port}...')
+server = HTTPServer(('0.0.0.0', port), HealthHandler)
+server.serve_forever()
