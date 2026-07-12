@@ -21,7 +21,8 @@ def cosine_similarity(vec_a: list, vec_b: list) -> float:
 
 # ── Redis helpers ──
 REDIS_PREFIX = "semcache:"
-SIMILARITY_THRESHOLD = 0.95
+SIMILARITY_THRESHOLD = float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.95"))
+
 MAX_CACHE_ENTRIES = 500
 CACHE_TTL = 86400 * 7  # 7 days
 
@@ -80,8 +81,12 @@ def store_cache(query_embedding: list, response: str):
             "r": response,
             "t": time.time()
         }
-        cache_key = f"{REDIS_PREFIX}{hash(response) % 1000000}"
+        import hashlib
+        h = hashlib.md5(response.encode('utf-8')).hexdigest()
+        cache_key = f"{REDIS_PREFIX}{h}"
         r.setex(cache_key, CACHE_TTL, json.dumps(entry))
+
+
         print(f"[SemCache] Stored (total: {key_count + 1})")
     except Exception as e:
         print(f"[SemCache] Store error: {e}")

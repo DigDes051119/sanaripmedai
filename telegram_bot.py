@@ -80,42 +80,34 @@ except Exception as _redis_err:
     print(f"[Cache] Redis недоступен ({_redis_err}) — работаем без кэша.")
 
 SEMANTIC_CACHE_TTL = 86400        # 24 часа
-SEMANTIC_CACHE_THRESHOLD = 0.95   # сходство >= 95% → кэш (difflib, не тратит API)
+SEMANTIC_CACHE_THRESHOLD = float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.95"))
+
 SEMANTIC_CACHE_PREFIX = "sem_cache:"
 
 def _cache_get(question: str):
-    """Ищет похожий вопрос в Redis-кэше. Возвращает ответ или None."""
-    if not _redis:
-        return None
+    """Ищет похожий вопрос в Redis-кэше с помощью векторных эмбеддингов."""
     try:
-        keys = _redis.keys(SEMANTIC_CACHE_PREFIX + "*")
-        if not keys:
+        from semantic_cache import check_cache
+        # Получаем эмбеддинг вопроса через Gemini API
+        query_vector = _get_gemini_query_embedding(question)
+        if not query_vector:
             return None
-        best_ratio = 0.0
-        best_val = None
-        q_lower = question.lower().strip()
-        for k in keys:
-            cached_q = k[len(SEMANTIC_CACHE_PREFIX):]
-            ratio = difflib.SequenceMatcher(None, q_lower, cached_q.lower()).ratio()
-            if ratio > best_ratio:
-                best_ratio = ratio
-                best_val = _redis.get(k)
-        if best_ratio >= SEMANTIC_CACHE_THRESHOLD and best_val:
-            print(f"[Cache] Кэш-попадание (сходство {best_ratio:.2f}): возвращаем сохранённый ответ.")
-            return best_val
+        return check_cache(query_vector)
     except Exception as e:
-        print(f"[Cache] Ошибка чтения кэша: {e}")
+        print(f"[Cache] Ошибка чтения векторного кэша: {e}")
     return None
 
 def _cache_set(question: str, answer: str):
     """Сохраняет пару вопрос→ответ в Redis-кэш."""
-    if not _redis:
-        return
     try:
-        key = SEMANTIC_CACHE_PREFIX + question.lower().strip()[:200]
-        _redis.setex(key, SEMANTIC_CACHE_TTL, answer)
+        from semantic_cache import store_cache
+        query_vector = _get_gemini_query_embedding(question)
+        if not query_vector:
+            return
+        store_cache(query_vector, answer)
     except Exception as e:
-        print(f"[Cache] Ошибка записи кэша: {e}")
+        print(f"[Cache] Ошибка записи векторного кэша: {e}")
+
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -464,46 +456,56 @@ try:
 except Exception as e:
     print(f"Ошибка загрузки базы первой помощи: {e}")
 
-# Инициализация и запуск локальной RAG базы знаний
+# Инициализация локальной RAG базы знаний (загружается асинхронно в фоне)
 DISEASES_INDEX = None
-try:
-    if os.path.exists(DISEASES_INDEX_PATH):
-        DISEASES_INDEX = SimpleTFIDFIndex.load(DISEASES_INDEX_PATH)
-        print("RAG база знаний заболеваний (TF-IDF) успешно загружена.")
-    else:
-        print("Внимание: RAG база знаний заболеваний (TF-IDF) не найдена.")
-except Exception as e:
-    print(f"Ошибка загрузки RAG базы знаний заболеваний (TF-IDF): {e}")
-
 PROFESSIONS_INDEX = None
-try:
-    if os.path.exists(PROFESSIONS_INDEX_PATH):
-        PROFESSIONS_INDEX = SimpleTFIDFIndex.load(PROFESSIONS_INDEX_PATH)
-        print("RAG база знаний профессий (TF-IDF) успешно загружена.")
-    else:
-        print("Внимание: RAG база знаний профессий (TF-IDF) не найдена.")
-except Exception as e:
-    print(f"Ошибка загрузки RAG базы знаний профессий (TF-IDF): {e}")
-
-# Инициализация векторной базы данных Qdrant
 QDRANT_CLIENT = None
-QDRANT_DB_PATH = os.path.join(BASE_DIR, "data", "qdrant_db_new")
-try:
-    if os.path.exists(QDRANT_DB_PATH):
-        QDRANT_CLIENT = QdrantClient(path=QDRANT_DB_PATH)
-        print("Векторная база знаний Qdrant успешно подключена.")
-    else:
-        print("Внимание: Векторная база знаний Qdrant не найдена. Будет использоваться TF-IDF.")
-except Exception as e:
-    print(f"Ошибка инициализации Qdrant: {e}")
 
-
-# Запускаем фоновый апдейтер только если мы НЕ на Vercel
-if "VERCEL" not in os.environ:
+def _load_rag_databases():
+    global DISEASES_INDEX, PROFESSIONS_INDEX, QDRANT_CLIENT
+    print("[RAG Load] Запуск фоновой загрузки баз знаний...")
+    
+    # 1. Загрузка TF-IDF индекса заболеваний
     try:
-        start_background_updater()
+        if os.path.exists(DISEASES_INDEX_PATH):
+            DISEASES_INDEX = SimpleTFIDFIndex.load(DISEASES_INDEX_PATH)
+            print("[RAG Load] RAG база знаний заболеваний (TF-IDF) успешно загружена.")
+        else:
+            print("[RAG Load] Внимание: RAG база знаний заболеваний (TF-IDF) не найдена.")
     except Exception as e:
-        print(f"Ошибка фоновой службы обновлений RAG: {e}")
+        print(f"[RAG Load] Ошибка загрузки RAG базы знаний заболеваний (TF-IDF): {e}")
+
+    # 2. Загрузка TF-IDF индекса профессий
+    try:
+        if os.path.exists(PROFESSIONS_INDEX_PATH):
+            PROFESSIONS_INDEX = SimpleTFIDFIndex.load(PROFESSIONS_INDEX_PATH)
+            print("[RAG Load] RAG база знаний профессий (TF-IDF) успешно загружена.")
+        else:
+            print("[RAG Load] Внимание: RAG база знаний профессий (TF-IDF) не найдена.")
+    except Exception as e:
+        print(f"[RAG Load] Ошибка загрузки RAG базы знаний профессий (TF-IDF): {e}")
+
+    # 3. Подключение Qdrant
+    QDRANT_DB_PATH = os.path.join(BASE_DIR, "data", "qdrant_db_new")
+    try:
+        if os.path.exists(QDRANT_DB_PATH):
+            QDRANT_CLIENT = QdrantClient(path=QDRANT_DB_PATH)
+            print("[RAG Load] Векторная база знаний Qdrant успешно подключена.")
+        else:
+            print("[RAG Load] Внимание: Векторная база знаний Qdrant не найдена. Будет использоваться TF-IDF.")
+    except Exception as e:
+        print(f"[RAG Load] Ошибка инициализации Qdrant: {e}")
+
+    # 4. Фоновый апдейтер RAG
+    if "VERCEL" not in os.environ:
+        try:
+            start_background_updater()
+            print("[RAG Load] Фоновая служба обновлений RAG запущена.")
+        except Exception as e:
+            print(f"[RAG Load] Ошибка фоновой службы обновлений RAG: {e}")
+
+# Запуск фонового потока загрузки баз
+threading.Thread(target=_load_rag_databases, daemon=True).start()
 
 
 # Системные промпты с профессиональным, успокаивающим тоном и строгими ограничениями
@@ -670,6 +672,82 @@ def get_relevant_context(user_text: str) -> tuple:
     return "\n\n".join(context_parts), list(set(detected_types))
 
 
+def validate_llm_response(response_text: str, user_query: str) -> tuple:
+    """
+    Двухуровневый Guardrails (валидатор ответов) для защиты пациентов от галлюцинаций:
+    1. Эвристический уровень (регулярные выражения и стоп-слова).
+    2. Семантический уровень (быстрый перекрестный аудит через Gemini Flash).
+    Возвращает (is_safe, processed_text)
+    """
+    # 1. Эвристический уровень (быстрые стоп-слова для опасных ситуаций)
+    dangerous_patterns = [
+        r"(?i)\b(увеличьте дозу|примите двойную дозу|назначьте себе|самостоятельно начните принимать)\b",
+        # Попытка назначить сильные антибиотики/рецептурные препараты без врача
+        r"(?i)\b(амоксициллин|азитромицин|цефтриаксон|левофлоксацин)\b.*?\b(без рецепта|купите сами|принимайте по)\b"
+    ]
+    for pattern in dangerous_patterns:
+        if re.search(pattern, response_text):
+            print(f"[Guardrails] Deterministic rule match on pattern: {pattern}")
+            return False, ""
+
+    # 2. Семантический уровень (проверка через Gemini Flash с ротацией ключей)
+    gemini_keys_str = os.getenv("GEMINI_API_KEYS", "")
+    if gemini_keys_str:
+        keys = [k.strip() for k in gemini_keys_str.split(",") if k.strip()]
+    else:
+        keys = [os.getenv("GEMINI_API_KEY")]
+    keys = [k for k in keys if k and k.strip()]
+
+    if not keys:
+        # Если ключей нет, пропускаем через локальные эвристики
+        print("[Guardrails] Warning: Нет ключей Gemini для семантического контроля, только эвристики.")
+        return True, response_text
+
+    prompt = (
+        "Ты — строгий медицинский эксперт-аудитор. Твоя задача — проверить сгенерированный ИИ-ассистентом ответ пациенту на безопасность.\n\n"
+        f"Вопрос пациента: \"{user_query}\"\n"
+        f"Сгенерированный ответ: \"{response_text}\"\n\n"
+        "Правила безопасности:\n"
+        "1. Ответ НЕ должен назначать точные дозировки сильнодействующих рецептурных препаратов без очного врача.\n"
+        "2. Ответ НЕ должен содержать опасных для жизни рекомендаций (например, игнорировать критические симптомы).\n"
+        "3. Ответ НЕ должен советовать самолечение при жизнеугрожающих состояниях (инфаркт, инсульт, отек Квинке и т.д.).\n\n"
+        "Ответь строго в формате JSON с ключами:\n"
+        "\"safe\": true (если ответ безопасен) или false (если нарушает правила безопасности)\n"
+        "\"reason\": \"краткое пояснение причины\"\n\n"
+        "Формат ответа: строго JSON, без markdown-разметки."
+    )
+
+    start_idx = _rr_next('gemini', len(keys))
+    for offset in range(len(keys)):
+        i = (start_idx + offset) % len(keys)
+        key = keys[i]
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}"
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"responseMimeType": "application/json"}
+        }
+        headers = {"Content-Type": "application/json"}
+        try:
+            print(f"[Guardrails] Запуск семантического аудита через Gemini Flash (ключ #{i+1})...")
+            resp = requests.post(url, json=payload, headers=headers, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                text_res = data["candidates"][0]["content"]["parts"][0]["text"]
+                audit_res = json.loads(text_res)
+                if audit_res.get("safe") is False:
+                    print(f"[Guardrails] Нарушение безопасности! Причина: {audit_res.get('reason')}")
+                    return False, ""
+                print("[Guardrails] Семантический аудит пройден успешно.")
+                return True, response_text
+        except Exception as e:
+            print(f"[Guardrails] Сбой аудита на ключе #{i+1}: {e}")
+            
+    # Если все API-запросы к Gemini свалились, по умолчанию считаем ответ безопасным,
+    # чтобы не ломать обслуживание, так как эвристический уровень уже пройден.
+    print("[Guardrails] Все попытки семантического аудита завершились ошибкой. Пропуск.")
+    return True, response_text
+
+
 def ask_deepseek_with_history(chat_id: int, user_message: str, context: str = "") -> tuple:
     """Запрос к DeepSeek с учетом истории диалога и контекста. Возвращает (clean_text, reply_markup)"""
     if not DEEPSEEK_API_KEY or DEEPSEEK_API_KEY == "your_deepseek_api_key_here":
@@ -678,9 +756,10 @@ def ask_deepseek_with_history(chat_id: int, user_message: str, context: str = ""
     # Инициализируем историю сообщений, если сессии нет
     load_chat_history(chat_id)
 
-    # Добавляем сообщение пользователя в историю
+    # Добавляем сообщение пользователя в историю и лог-буфер
     USER_SESSIONS[chat_id].append({"role": "user", "content": user_message})
     save_chat_history(chat_id)
+    add_to_log_buffer(chat_id, "user", user_message)
 
     # ── Семантический кэш (экономия 40% API-запросов) ──────────────────────────
     cached = _cache_get(user_message)
@@ -688,6 +767,7 @@ def ask_deepseek_with_history(chat_id: int, user_message: str, context: str = ""
         clean_text, markup = parse_dynamic_buttons(cached)
         USER_SESSIONS[chat_id].append({"role": "assistant", "content": cached})
         save_chat_history(chat_id)
+        add_to_log_buffer(chat_id, "assistant", cached, event_type="cache_hit")
         return clean_text, markup
 
     # Ограничиваем историю последними 10 сообщениями
@@ -818,6 +898,16 @@ def ask_deepseek_with_history(chat_id: int, user_message: str, context: str = ""
         data = resp.json()
         raw_reply = data["choices"][0]["message"]["content"]
 
+        # Применяем Guardrails для верификации безопасности медицинских советов
+        is_safe, _ = validate_llm_response(raw_reply, user_message)
+        if not is_safe:
+            raw_reply = (
+                "⚠️ Сформированный ответ содержит потенциально небезопасные медицинские рекомендации "
+                "или указание дозировок препаратов без очного осмотра. В целях вашей безопасности "
+                "ответ был заблокирован. Пожалуйста, обратитесь к врачу очно или воспользуйтесь кнопкой "
+                "«Вызвать скорую помощь» при неотложных состояниях."
+            )
+
         # Обновляем статистику токенов
         usage = data.get("usage", {})
         if usage:
@@ -827,13 +917,15 @@ def ask_deepseek_with_history(chat_id: int, user_message: str, context: str = ""
             USER_TOKEN_USAGE[chat_id]["completion_tokens"] += usage.get("completion_tokens", 0)
             USER_TOKEN_USAGE[chat_id]["total_tokens"] += usage.get("total_tokens", 0)
 
-        # Добавляем ответ ассистента в историю диалога
+        # Добавляем ответ ассистента в историю диалога и лог-буфер
         USER_SESSIONS[chat_id].append({"role": "assistant", "content": raw_reply})
         save_chat_history(chat_id)
+        add_to_log_buffer(chat_id, "assistant", raw_reply)
 
-        # Сохраняем в семантический кэш (кроме персонализированных ответов)
-        if len(user_message) > 10 and "[OFFTOPIC]" not in raw_reply:
+        # Сохраняем в семантический кэш (только если ответ безопасен и не оффтопик)
+        if is_safe and len(user_message) > 10 and "[OFFTOPIC]" not in raw_reply:
             _cache_set(user_message, raw_reply)
+
         
         # Обработка тега [OFFTOPIC]
         reply = raw_reply
@@ -1112,6 +1204,9 @@ def save_appointment_request(chat_id, state_data):
     except Exception as e:
         print(f"Ошибка сохранения записи: {e}")
         
+_whisper_model = None
+_whisper_lock = threading.Lock()
+
 def transcribe_voice_with_groq(file_bytes: bytes) -> str:
     """Транскрибация аудио-файла голоса через Groq Whisper API (поддерживает кыргызский, русский и английский)"""
     if not GROQ_API_KEY or GROQ_API_KEY == "your_groq_api_key_here":
@@ -1139,6 +1234,46 @@ def transcribe_voice_with_groq(file_bytes: bytes) -> str:
     except Exception as e:
         print(f"Ошибка Groq Whisper: {e}")
         return ""
+
+
+def transcribe_voice(file_bytes: bytes) -> str:
+    """Транскрибация аудио-файла локально через Whisper с резервным fallback на Groq API"""
+    global _whisper_model
+    
+    # 1. Попытка локального распознавания через Whisper
+    try:
+        import tempfile
+        import whisper
+        
+        # Ленивая загрузка модели под локом
+        with _whisper_lock:
+            if _whisper_model is None:
+                print("[Whisper] Загрузка локальной модели 'tiny' на CPU...")
+                # Ограничиваем количество потоков для torch, чтобы не вешать весь CPU при нагрузке
+                import torch
+                torch.set_num_threads(2)
+                _whisper_model = whisper.load_model("tiny")
+                print("[Whisper] Локальная модель загружена успешно.")
+        
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+            
+        try:
+            print("[Whisper] Начало локального распознавания...")
+            result = _whisper_model.transcribe(tmp_path, fp16=False)
+            text = result.get("text", "").strip()
+            print(f"[Whisper] Успешно распознано локально: '{text}'")
+            return text
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+    except Exception as e:
+        print(f"[Whisper] Ошибка локального распознавания: {e}. Переключение на Groq Whisper API...")
+        
+    # 2. Резервный Fallback на Groq
+    return transcribe_voice_with_groq(file_bytes)
+
 
 
 def analyze_image_with_gemini(image_bytes: bytes) -> str:
@@ -1622,6 +1757,113 @@ def send_disclaimer(chat_id):
     bot.send_message(chat_id, disclaimer_text, reply_markup=markup, parse_mode='Markdown')
 
 
+# --- Системный буфер логов чата и выгрузка в Hugging Face Datasets ---
+LOG_BUFFER = []
+LOG_BUFFER_LOCK = threading.Lock()
+LOG_BUFFER_PATH = os.path.join(BASE_DIR, "data", "log_buffer.json")
+
+def load_log_buffer():
+    global LOG_BUFFER
+    if os.path.exists(LOG_BUFFER_PATH):
+        try:
+            with open(LOG_BUFFER_PATH, "r", encoding="utf-8") as f:
+                LOG_BUFFER = json.load(f)
+            print(f"[Logs] Загружено {len(LOG_BUFFER)} записей из локального буфера логов.")
+        except Exception as e:
+            print(f"[Logs] Ошибка загрузки локального буфера логов: {e}")
+
+def _save_log_buffer_locally():
+    try:
+        # Убедимся, что папка data существует
+        os.makedirs(os.path.dirname(LOG_BUFFER_PATH), exist_ok=True)
+        with open(LOG_BUFFER_PATH, "w", encoding="utf-8") as f:
+            json.dump(LOG_BUFFER, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[Logs] Ошибка сохранения буфера логов: {e}")
+
+def add_to_log_buffer(chat_id: int, role: str, text: str, event_type: str = "message"):
+    with LOG_BUFFER_LOCK:
+        LOG_BUFFER.append({
+            "timestamp": time.time(),
+            "chat_id": chat_id,
+            "role": role,
+            "text": text,
+            "event": event_type
+        })
+        _save_log_buffer_locally()
+
+def upload_logs_to_hf():
+    global LOG_BUFFER
+    token = os.getenv("HF_TOKEN")
+    repo_id = os.getenv("HF_DATASET_REPO") # e.g. "Akimkhan/sanarip-med-ai-logs"
+    
+    if not token or not repo_id:
+        print("[HF Logs] WARNING: HF_TOKEN или HF_DATASET_REPO не заданы в .env. Пропуск автовыгрузки.")
+        return
+        
+    with LOG_BUFFER_LOCK:
+        if not LOG_BUFFER:
+            print("[HF Logs] Лог-буфер пуст, нечего выгружать.")
+            return
+        logs_to_upload = list(LOG_BUFFER)
+        
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=token)
+        
+        # Создаем временный файл
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", encoding="utf-8", delete=False) as tmp:
+            for entry in logs_to_upload:
+                tmp.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            tmp_path = tmp.name
+            
+        import datetime
+        date_str = datetime.date.today().strftime("%Y_%m_%d")
+        path_in_repo = f"logs_{date_str}.jsonl"
+        
+        print(f"[HF Logs] Загрузка {len(logs_to_upload)} логов в репозиторий датасета {repo_id}...")
+        api.upload_file(
+            path_or_fileobj=tmp_path,
+            path_in_repo=path_in_repo,
+            repo_id=repo_id,
+            repo_type="dataset",
+            commit_message=f"Upload chat logs for {date_str}"
+        )
+        print("[HF Logs] Загрузка логов на Hugging Face успешно завершена.")
+        
+        # Очищаем буфер после успешной загрузки
+        with LOG_BUFFER_LOCK:
+            del LOG_BUFFER[:len(logs_to_upload)]
+            _save_log_buffer_locally()
+            
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+            
+    except Exception as e:
+        print(f"[HF Logs] Ошибка загрузки логов на Hugging Face: {e}")
+
+def start_logs_uploader_thread():
+    def run_loop():
+        # Тестовая выгрузка через 60 секунд после старта
+        time.sleep(60)
+        print("[Logs Thread] Проверка накопленных логов при старте...")
+        upload_logs_to_hf()
+        
+        while True:
+            # Выгружаем раз в сутки (86400 секунд)
+            time.sleep(86400)
+            print("[Logs Thread] Запуск плановой выгрузки логов...")
+            upload_logs_to_hf()
+            
+    threading.Thread(target=run_loop, daemon=True).start()
+    print("[Logs Thread] Фоновая служба выгрузки логов запущена.")
+
+# Инициализируем логи
+load_log_buffer()
+start_logs_uploader_thread()
+
+
 # --- Системы Безопасности и защиты ИИ-агента ---
 import re
 import html
@@ -1986,9 +2228,10 @@ def handle_voice(message):
 
         
 
-        # Распознаем текст с помощью Groq Whisper (поддерживает кыргызский, русский и английский)
+        # Распознаем текст локально с помощью Whisper (с резервным Groq API)
 
-        transcribed_text = transcribe_voice_with_groq(downloaded_file)
+        transcribed_text = transcribe_voice(downloaded_file)
+
 
         
 
@@ -2032,31 +2275,31 @@ def handle_photo(message):
 
     bot.reply_to(message, "Получил изображение. Анализирую визуальные симптомы... 🔍")
     bot.send_chat_action(chat_id, 'typing')
-
     try:
         photo = message.photo[-1]
         file_info = bot.get_file(photo.file_id)
         downloaded_file = bot.download_file(file_info.file_path)
 
-        # Вызываем Vision API
+        # Вызываем Vision API для получения текстового описания симптомов на фото
         analysis_result = analyze_image_with_groq(downloaded_file)
 
-        # Парсим кнопки
-        clean_text, markup = parse_dynamic_buttons(analysis_result)
+        # Совмещаем описание изображения и подпись пациента
+        caption = message.caption.strip() if message.caption else ""
+        combined_query = f"[Симптомы на фото]: {analysis_result}"
+        if caption:
+            combined_query += f"\n[Комментарий пациента]: {caption}"
 
-        # Сохраняем в историю
-        if chat_id not in USER_SESSIONS:
-            USER_SESSIONS[chat_id] = []
+        # Отправляем объединенный запрос в общий RAG + LLM пайплайн
+        clean_text, markup = ask_deepseek_with_history(chat_id, combined_query)
 
-        caption_text = f" (Подпись: '{message.caption}')" if message.caption else ""
-        USER_SESSIONS[chat_id].append({"role": "user", "content": f"[Отправлено фото]{caption_text}"})
-        USER_SESSIONS[chat_id].append({"role": "assistant", "content": analysis_result})
-        save_chat_history(chat_id)
-
-        bot.send_message(chat_id, clean_text, reply_markup=markup, parse_mode='Markdown')
+        # Отправляем ответ пациенту
+        send_message_safe(chat_id, clean_text, reply_markup=markup, parse_mode='Markdown')
 
     except Exception as e:
         print(f"Ошибка обработки изображения: {e}")
+        bot.reply_to(message, "Произошла ошибка при анализе изображения. Пожалуйста, попробуйте еще раз.")
+
+
 
 def find_nearest_clinics(lat, lon, specialty=None, top_k=3):
     import math
