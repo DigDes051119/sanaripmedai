@@ -7,5 +7,6 @@ COPY . .
 
 EXPOSE 7860
 
-# Use Python's built-in HTTP server — no deps needed
-CMD ["python", "-u", "server.py"]
+# Используем entrypoint.sh для запуска health-check сервера и Telegram бота
+RUN chmod +x entrypoint.sh
+CMD ["bash", "entrypoint.sh"]
