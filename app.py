@@ -15,6 +15,16 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
 
+# ── Запуск Telegram-бота в фоновом потоке ──
+if bot and not os.environ.get("VERCEL"):
+    import threading
+    def _start_tg_polling():
+        if hasattr(bot, 'infinity_polling'):
+            print("[Telegram] Starting background polling...")
+            bot.infinity_polling()
+    threading.Thread(target=_start_tg_polling, daemon=True).start()
+    print("[Telegram] Background polling started.")
+
 if not DEEPSEEK_API_KEY:
     print("WARNING: Отсутствует DEEPSEEK_API_KEY в переменных окружения.")
 
