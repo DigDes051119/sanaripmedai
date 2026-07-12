@@ -62,6 +62,8 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Папка для локального хранения
+_DB_FALLBACK = False  # Если True - PostgreSQL недоступен
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -76,6 +78,9 @@ APPOINTMENTS_FILE = os.path.join(DATA_DIR, "appointments.json")
 EMERGENCY_FILE = os.path.join(DATA_DIR, "emergency_requests.json")
 
 def get_connection():
+    global _DB_FALLBACK
+    if _DB_FALLBACK:
+        return None
     if not DATABASE_URL:
         return None
     retry_delay = 2
@@ -91,6 +96,7 @@ def get_connection():
                 print(f"[DB] Retrying in {retry_delay} sec...")
                 time.sleep(retry_delay)
     print("[DB] All connection attempts exhausted. Falling back to JSON mode.")
+    _DB_FALLBACK = True
     return None
 
 
