@@ -46,6 +46,21 @@ def test_telegram():
     except Exception as e:
         results["cloudflare_worker"] = f"Failed: {e}"
         
+    # 2b. Тест публичного прокси Telegg.ru
+    try:
+        r = requests.get("https://telegg.ru", timeout=15)
+        results["telegg_ru"] = f"Success (Status: {r.status_code})"
+    except Exception as e:
+        results["telegg_ru"] = f"Failed: {e}"
+        
+    # 2c. Тест публичного прокси tapi.chary.us
+    try:
+        r = requests.get("https://tapi.chary.us", timeout=15)
+        results["tapi_chary_us"] = f"Success (Status: {r.status_code})"
+    except Exception as e:
+        results["tapi_chary_us"] = f"Failed: {e}"
+
+        
     # 3. Тест Google.com (для проверки общего интернета)
     try:
         r = requests.get("https://www.google.com", timeout=10)
