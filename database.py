@@ -79,13 +79,19 @@ def get_connection():
     if not DATABASE_URL:
         return None
     retry_delay = 5
-    while True:
+    max_retries = 10
+    for attempt in range(1, max_retries + 1):
         try:
             conn = psycopg2.connect(DATABASE_URL)
+            print(f"[DB] Connected to PostgreSQL (attempt {attempt}).")
             return conn
         except Exception as e:
-            print(f"[DB] Ошибка подключения к базе данных ({e}). Повторная попытка через {retry_delay} сек...")
-            time.sleep(retry_delay)
+            print(f"[DB] Connection error (attempt {attempt}/{max_retries}): {e}")
+            if attempt < max_retries:
+                print(f"[DB] Retrying in {retry_delay} sec...")
+                time.sleep(retry_delay)
+    print("[DB] All connection attempts exhausted. Falling back to JSON mode.")
+    return None
 
 
 def init_db():
