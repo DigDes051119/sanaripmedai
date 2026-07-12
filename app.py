@@ -27,6 +27,15 @@ def webhook():
     else:
         abort(403)
 
+@app.route("/test_telegram")
+def test_telegram():
+    import requests
+    try:
+        r = requests.get("https://api.telegram.org", timeout=5)
+        return f"<h1>Telegram API Test</h1><p>Status Code: {r.status_code}</p><p>Response: Success</p>", 200
+    except Exception as e:
+        return f"<h1>Telegram API Test</h1><p>Error: {e}</p>", 500
+
 def init_webhook():
     """Настройка вебхука Telegram бота в фоновом режиме"""
     import threading
