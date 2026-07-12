@@ -136,8 +136,18 @@ if token_missing:
         # Для работы в Flask / Vercel не валим весь сервер при импорте, а создаем заглушку
         bot = telebot.TeleBot("123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ", threaded=False)
 else:
-    # Инициализируем бота
+    # Инициализируем бота с кастомными тайм-аутами и возможностью проксирования API
+    import telebot.apihelper as apihelper
+    apihelper.CONNECT_TIMEOUT = 30
+    apihelper.READ_TIMEOUT = 30
+    
+    custom_api_url = os.getenv("TELEGRAM_API_URL")
+    if custom_api_url:
+        apihelper.API_URL = custom_api_url
+        print(f"[Telegram API] Использование кастомного API URL: {custom_api_url}")
+        
     bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, threaded=False)
+
 
 # URLs для API
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
@@ -1881,9 +1891,12 @@ try:
     import redis
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     redis_client = redis.from_url(redis_url, socket_timeout=1)
+    redis_client.ping()
     print("[Redis] Успешно подключено для Rate-limiting")
 except Exception as e:
+    redis_client = None
     print(f"[Redis] Ошибка подключения к Redis: {e}. Будет использована локальная память.")
+
 
 # Локальный Rate-limiting fallback
 MEMORY_RATE_LIMITS = {}

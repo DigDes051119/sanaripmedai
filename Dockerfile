@@ -2,10 +2,12 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install system dependencies (ffmpeg for whisper)
+# Install system dependencies (ffmpeg for whisper, redis-server for cache/rate-limiting)
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    redis-server \
     && rm -rf /var/lib/apt/lists/*
+
 
 # Install PyTorch CPU-only first to keep image lightweight and prevent CUDA download
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu

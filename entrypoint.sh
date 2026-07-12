@@ -6,8 +6,13 @@ echo "[STARTUP] Python: $(python --version 2>&1)"
 
 export PORT=7860
 
+# Запуск локального Redis-сервера
+echo "[STARTUP] Starting local Redis server..."
+redis-server --daemonize yes
+
 # Запуск основного Flask веб-сервера (обслуживает и вебхуки, и healthcheck)
 echo "[STARTUP] Starting Flask / Webhook server (app.py) on port $PORT..."
+
 python -u app.py 2>&1 &
 APP_PID=$!
 
