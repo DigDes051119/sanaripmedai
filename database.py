@@ -314,14 +314,14 @@ def set_user_state(chat_id, state_data):
 # 3. Appointments
 def save_appointment(chat_id, appointment_data):
     # Шифруем ПДн-поля перед записью в БД
-    encrypted_data = _encrypt_dict_pii(appointment_data)
+    safe_data = {k: v for k, v in appointment_data.items() if k.lower() not in _PII_FIELDS}
     conn = get_connection()
     if conn:
         try:
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO appointments (chat_id, data) VALUES (%s, %s)",
-                    (chat_id, json.dumps(encrypted_data))
+                    (chat_id, json.dumps(safe_data))
                 )
                 conn.commit()
                 return
@@ -331,7 +331,8 @@ def save_appointment(chat_id, appointment_data):
         finally:
             conn.close()
 
-    # Fallback
+    # Fallback (JSON - encrypt PII)
+    encrypted_data = _encrypt_dict_pii(appointment_data)
     appointments = load_json_state(APPOINTMENTS_FILE, [])
     appointments.append(encrypted_data)
     save_json_state(APPOINTMENTS_FILE, appointments)
@@ -349,7 +350,6 @@ def get_all_appointments():
                     item = row["data"]
                     if isinstance(item, str):
                         item = json.loads(item)
-                    item = _decrypt_dict_pii(item)
                     item["id"] = row["id"]
                     item["chat_id"] = row["chat_id"]
                     appointments.append(item)
@@ -359,20 +359,21 @@ def get_all_appointments():
         finally:
             conn.close()
             
-    # Fallback
-    return load_json_state(APPOINTMENTS_FILE, [])
+    # Fallback (JSON - decrypt PII)
+    apps = load_json_state(APPOINTMENTS_FILE, [])
+    return [_decrypt_dict_pii(a) for a in apps]
 
 # 4. Emergency Requests
 def save_emergency_request(chat_id, request_data):
     # Шифруем ПДн-поля перед записью
-    encrypted_data = _encrypt_dict_pii(request_data)
+    safe_data = {k: v for k, v in request_data.items() if k.lower() not in _PII_FIELDS}
     conn = get_connection()
     if conn:
         try:
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO emergency_requests (chat_id, data) VALUES (%s, %s)",
-                    (chat_id, json.dumps(encrypted_data))
+                    (chat_id, json.dumps(safe_data))
                 )
                 conn.commit()
                 return
@@ -382,7 +383,8 @@ def save_emergency_request(chat_id, request_data):
         finally:
             conn.close()
 
-    # Fallback
+    # Fallback (JSON - encrypt PII)
+    encrypted_data = _encrypt_dict_pii(request_data)
     requests_list = load_json_state(EMERGENCY_FILE, [])
     requests_list.append(encrypted_data)
     save_json_state(EMERGENCY_FILE, requests_list)
@@ -399,7 +401,6 @@ def get_all_emergency_requests():
                     item = row["data"]
                     if isinstance(item, str):
                         item = json.loads(item)
-                    item = _decrypt_dict_pii(item)
                     item["id"] = row["id"]
                     item["chat_id"] = row["chat_id"]
                     requests_list.append(item)
@@ -409,8 +410,9 @@ def get_all_emergency_requests():
         finally:
             conn.close()
             
-    # Fallback
-    return load_json_state(EMERGENCY_FILE, [])
+    # Fallback (JSON - decrypt PII)
+    reqs = load_json_state(EMERGENCY_FILE, [])
+    return [_decrypt_dict_pii(r) for r in reqs]
 
 # 5. Chat History
 def get_chat_history(chat_id):
