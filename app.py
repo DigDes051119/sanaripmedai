@@ -32,25 +32,40 @@ def test_telegram():
     import requests
     results = {}
     
-    # 1. Тест прямого Telegram API
+    # 1. Тест прямого Telegram API (таймаут 15 сек)
     try:
-        r = requests.get("https://api.telegram.org", timeout=5)
+        r = requests.get("https://api.telegram.org", timeout=15)
         results["direct_api"] = f"Success (Status: {r.status_code})"
     except Exception as e:
         results["direct_api"] = f"Failed: {e}"
         
-    # 2. Тест Cloudflare Worker Proxy
+    # 2. Тест Cloudflare Worker Proxy (таймаут 15 сек)
     try:
-        r = requests.get("https://fancy-mountain-f16b.sanaripmedai.workers.dev", timeout=5)
+        r = requests.get("https://fancy-mountain-f16b.sanaripmedai.workers.dev", timeout=15)
         results["cloudflare_worker"] = f"Success (Status: {r.status_code})"
     except Exception as e:
         results["cloudflare_worker"] = f"Failed: {e}"
         
+    # 3. Тест Google.com (для проверки общего интернета)
+    try:
+        r = requests.get("https://www.google.com", timeout=10)
+        results["google_com"] = f"Success (Status: {r.status_code})"
+    except Exception as e:
+        results["google_com"] = f"Failed: {e}"
+        
+    # 4. Проверка внешнего IP контейнера
+    try:
+        r = requests.get("https://httpbin.org/ip", timeout=10)
+        results["container_ip"] = f"Success (IP: {r.json().get('origin')})"
+    except Exception as e:
+        results["container_ip"] = f"Failed: {e}"
+        
     # Форматируем красивый вывод
-    html_output = "<h1>Диагностика сети Telegram API</h1>"
+    html_output = "<h1>Диагностика сети Telegram API (Расширенная)</h1>"
     for name, res in results.items():
         html_output += f"<p><b>{name}:</b> {res}</p>"
     return html_output, 200
+
 
 
 def init_webhook():
