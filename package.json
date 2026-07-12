@@ -1,13 +1,12 @@
 {
   "name": "sanarip-med-ai-whatsapp-bridge",
   "version": "1.0.0",
-  "description": "WhatsApp bridge for Sanarip Med AI using Baileys socket connection",
+  "description": "WhatsApp bridge for Sanarip Med AI (inactive — Node.js not installed in Docker)",
   "main": "whatsapp_bridge.js",
   "scripts": {
     "start": "node whatsapp_bridge.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.6.0",
     "axios": "^1.6.8",
     "dotenv": "^16.4.5",
     "qrcode-terminal": "^0.12.0"
