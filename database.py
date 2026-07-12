@@ -82,7 +82,7 @@ def get_connection():
     max_retries = 5
     for attempt in range(1, max_retries + 1):
         try:
-            conn = psycopg2.connect(DATABASE_URL)
+            conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
             print(f"[DB] Connected to PostgreSQL (attempt {attempt}).")
             return conn
         except Exception as e:
