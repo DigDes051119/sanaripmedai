@@ -6,9 +6,10 @@ echo "[STARTUP] Python: $(python --version 2>&1)"
 
 export PORT=7860
 
-# Запуск локального Redis-сервера
+# Запуск локального Redis-сервера (в /tmp для обхода ограничений прав на Hugging Face)
 echo "[STARTUP] Starting local Redis server..."
-redis-server --daemonize yes
+redis-server --port 6379 --dir /tmp --pidfile /tmp/redis-server.pid --daemonize yes
+
 
 # Запуск основного Flask веб-сервера (обслуживает и вебхуки, и healthcheck)
 echo "[STARTUP] Starting Flask / Webhook server (app.py) on port $PORT..."
