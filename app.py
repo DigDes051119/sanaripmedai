@@ -21,8 +21,10 @@ def webhook():
         json_string = request.get_data().decode("utf-8")
         update = telebot.types.Update.de_json(json_string)
         
-        # Передаем обновление в bot для обработки диспетчерами
-        bot.process_new_updates([update])
+        # Передаем обновление в bot для обработки диспетчерами в фоновом потоке,
+        # чтобы избежать таймаутов ответа Telegram (Read timeout expired) при долгой генерации ИИ.
+        import threading
+        threading.Thread(target=bot.process_new_updates, args=([update],), daemon=True).start()
         return "OK", 200
     else:
         abort(403)
