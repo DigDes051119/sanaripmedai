@@ -3,12 +3,15 @@
 echo "[STARTUP $(date)] ========================================"
 echo "[STARTUP] Starting Sanarip Med AI container..."
 echo "[STARTUP] Python: $(python --version 2>&1)"
+echo "[STARTUP] Memory info:"
+free -h 2>/dev/null || echo "[STARTUP] free command not available"
 
 export PORT=7860
 
 # Запуск локального Redis-сервера (в /tmp для обхода ограничений прав на Hugging Face)
 echo "[STARTUP] Starting local Redis server..."
-redis-server --port 6379 --dir /tmp --pidfile /tmp/redis-server.pid --daemonize yes
+redis-server --port 6379 --dir /tmp --pidfile /tmp/redis-server.pid --daemonize yes 2>&1 || echo "[STARTUP] WARNING: Redis failed to start, continuing without it"
+echo "[STARTUP] Redis start attempted."
 
 
 # Запуск основного Flask веб-сервера (обслуживает и вебхуки, и healthcheck)

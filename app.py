@@ -137,8 +137,34 @@ def init_webhook():
     # Запускаем в фоновом потоке, чтобы сетевые задержки Telegram не тормозили старт Flask
     threading.Thread(target=run_setup, daemon=True).start()
 
-# Вызываем настройку вебхука при старте
+# ─── Keep-alive: предотвращение засыпания HF Space ─────────────────────────────
+def start_keep_alive():
+    """Фоновый поток, который пингует свой /health каждые 25 минут,
+    чтобы Hugging Face Space не уходил в sleep из-за неактивности."""
+    import threading
+    import time
+    import requests as req
+
+    def ping_loop():
+        # Даём серверу время полностью стартовать
+        time.sleep(60)
+        port = int(os.environ.get("PORT", 7860))
+        health_url = f"http://localhost:{port}/health"
+        print(f"[Keep-Alive] Started. Pinging {health_url} every 25 minutes.")
+        while True:
+            try:
+                r = req.get(health_url, timeout=10)
+                print(f"[Keep-Alive] Ping OK (status={r.status_code})")
+            except Exception as e:
+                print(f"[Keep-Alive] Ping failed: {e}")
+            time.sleep(25 * 60)  # 25 минут
+
+    threading.Thread(target=ping_loop, daemon=True).start()
+
+
+# Вызываем настройку вебхука и keep-alive при старте
 init_webhook()
+start_keep_alive()
 
 
 if __name__ == "__main__":
