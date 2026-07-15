@@ -133,7 +133,7 @@ if token_missing:
         import sys
         sys.exit(1)
     else:
-        # Для работы в Flask / Vercel не валим весь сервер при импорте, а создаем заглушку
+        # Для работы во время сборки образа (когда нет токенов) не валим весь сервер при импорте, а создаем заглушку
         bot = telebot.TeleBot("123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ", threaded=False)
 else:
     # Инициализируем бота с кастомными тайм-аутами и возможностью проксирования API
@@ -143,6 +143,10 @@ else:
     
     custom_api_url = os.getenv("TELEGRAM_API_URL")
     if custom_api_url:
+        if "vercel" in custom_api_url.lower():
+            # Заменяем засыпающий Vercel-прокси на стабильный Cloudflare Worker прокси
+            custom_api_url = "https://fancy-mountain-f16b.sanaripmedai.workers.dev/bot{0}/{1}"
+            print("[Telegram API] Vercel-прокси отключен. Перенаправлено на Cloudflare Worker прокси.")
         apihelper.API_URL = custom_api_url
         print(f"[Telegram API] Использование кастомного API URL: {custom_api_url}")
         
@@ -515,12 +519,11 @@ def _load_rag_databases():
         print(f"[RAG Load] Ошибка инициализации Qdrant: {e}")
 
     # 4. Фоновый апдейтер RAG
-    if "VERCEL" not in os.environ:
-        try:
-            start_background_updater()
-            print("[RAG Load] Фоновая служба обновлений RAG запущена.")
-        except Exception as e:
-            print(f"[RAG Load] Ошибка фоновой службы обновлений RAG: {e}")
+    try:
+        start_background_updater()
+        print("[RAG Load] Фоновая служба обновлений RAG запущена.")
+    except Exception as e:
+        print(f"[RAG Load] Ошибка фоновой службы обновлений RAG: {e}")
 
 # Запуск фонового потока загрузки баз
 threading.Thread(target=_load_rag_databases, daemon=True).start()
