@@ -17,7 +17,7 @@ def health():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    if request.headers.get("content-type") == "application/json":
+    if request.is_json:
         json_string = request.get_data().decode("utf-8")
         update = telebot.types.Update.de_json(json_string)
         
@@ -27,6 +27,7 @@ def webhook():
         threading.Thread(target=bot.process_new_updates, args=([update],), daemon=True).start()
         return "OK", 200
     else:
+        print(f"[Webhook Error] Invalid content-type: {request.headers.get('content-type')}")
         abort(403)
 
 @app.route("/test_telegram")

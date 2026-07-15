@@ -2051,12 +2051,6 @@ def handle_text(message):
     # Проверка, заполняет ли пользователь форму
     if chat_id in USER_STATES:
         text = sanitized_text # Используем санитаризованный текст для форм, не обрезая PII
-    else:
-        # Для общего чата с ИИ проверяем на инъекции и вырезаем PII
-        if check_prompt_injection(raw_text):
-            bot.reply_to(message, "⚠️ Обнаружена попытка некорректного запроса. Пожалуйста, задавайте вопросы только по теме здоровья.")
-            return
-        text = anonymize_pii(sanitized_text)
         state_data = USER_STATES[chat_id]
         current_state = state_data.get("state")
 
@@ -2188,6 +2182,13 @@ def handle_text(message):
             save_home_doctor_request(chat_id, state_data)
             save_json_state(STATES_FILE, USER_STATES)
             return
+
+    # Если мы здесь, значит пользователь не заполняет форму
+    # Для общего чата с ИИ проверяем на инъекции и вырезаем PII
+    if check_prompt_injection(raw_text):
+        bot.reply_to(message, "⚠️ Обнаружена попытка некорректного запроса. Пожалуйста, задавайте вопросы только по теме здоровья.")
+        return
+    text = anonymize_pii(sanitized_text)
 
     # Обработка кнопок быстрого меню
     if text == "📚 Первая помощь":
