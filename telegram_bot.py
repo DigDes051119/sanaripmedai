@@ -151,6 +151,21 @@ else:
         print(f"[Telegram API] Использование кастомного API URL: {custom_api_url}")
         
     bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, threaded=False)
+def safe_answer_callback_query(call_id, text=None, show_alert=False):
+    try:
+        if text:
+            bot.answer_callback_query(call_id, text, show_alert=show_alert)
+        else:
+            bot.answer_callback_query(call_id)
+    except Exception as e:
+        print(f"[SafeAnswer] Ignored error: {e}")
+
+def safe_edit_message_reply_markup(chat_id, message_id, reply_markup=None):
+    try:
+        bot.edit_message_reply_markup(chat_id, message_id, reply_markup=reply_markup)
+    except Exception as e:
+        print(f"[SafeEdit] Ignored error: {e}")
+
 
 
 # URLs для API
@@ -1435,18 +1450,18 @@ def handle_callback(call):
         import traceback
         traceback.print_exc()
         try:
-            bot.answer_callback_query(call.id, "Произошла ошибка при обработке нажатия.")
+            safe_answer_callback_query(call.id, "Произошла ошибка при обработке нажатия.")
         except:
             pass
 
 def _handle_callback_logic(call):
     chat_id = call.message.chat.id
     if chat_id in USER_BLOCKED:
-        bot.answer_callback_query(call.id, "Диалог остановлен. Вы заблокированы за оффтоп.")
+        safe_answer_callback_query(call.id, "Диалог остановлен. Вы заблокированы за оффтоп.")
         return
 
     if call.data == "view_offer":
-        bot.answer_callback_query(call.id, "Загружаю оферту...")
+        safe_answer_callback_query(call.id, "Загружаю оферту...")
         pdf_path = os.path.join(BASE_DIR, "Sanarip_Med_AI_Public_Offer.pdf")
         if os.path.exists(pdf_path):
             try:
@@ -1462,8 +1477,8 @@ def _handle_callback_logic(call):
     if call.data == "accept_disclaimer":
         USER_ACCEPTED_DISCLAIMER.add(chat_id)
         save_json_state(DISCLAIMER_FILE, USER_ACCEPTED_DISCLAIMER)
-        bot.answer_callback_query(call.id, "Спасибо за подтверждение!")
-        bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
+        safe_answer_callback_query(call.id, "Спасибо за подтверждение!")
+        safe_edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
         instructions = (
             "Спасибо! Соглашение принято, теперь я готов помочь вам. 👍\n\n"
             "✍️ **Вы можете описать ваши жалобы текстом** (например: 'болит ухо' или 'укусила собака') "
@@ -1485,7 +1500,7 @@ def _handle_callback_logic(call):
         }
         key = condition_map.get(call.data)
         if key:
-            bot.answer_callback_query(call.id, "Загружаю...")
+            safe_answer_callback_query(call.id, "Загружаю...")
             context, _ = get_relevant_context(key)
             reply, markup = ask_deepseek_with_history(chat_id, f"Напиши инструкцию первой помощи при теме: '{key}'", context)
             if reply is not None:
@@ -1496,7 +1511,7 @@ def _handle_callback_logic(call):
         try:
             index = int(call.data.split("_")[1])
             clinic = CLINICS_DB[index]
-            bot.answer_callback_query(call.id, "Загружаю...")
+            safe_answer_callback_query(call.id, "Загружаю...")
             
             # Достаем сохраненную специальность из текущего состояния
             state_data = USER_STATES.get(chat_id, {}) or USER_STATES.get(str(chat_id), {})
@@ -1540,7 +1555,7 @@ def _handle_callback_logic(call):
 
     # 4. Выбор района для скорой помощи
     elif call.data.startswith("region_"):
-        bot.answer_callback_query(call.id)
+        safe_answer_callback_query(call.id)
         region_map = {
             "region_lenin": "Ленинский",
             "region_okt": "Октябрьский",
@@ -1575,7 +1590,7 @@ def _handle_callback_logic(call):
 
     elif call.data.startswith("user_choice:"):
         choice = call.data.split("user_choice:")[1]
-        bot.answer_callback_query(call.id)
+        safe_answer_callback_query(call.id)
         
         # Симулируем отправку сообщения пользователем в чат, отображая его выбор
         bot.send_message(chat_id, f"👉 Выбрано: {choice}")
