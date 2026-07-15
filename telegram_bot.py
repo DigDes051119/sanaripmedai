@@ -1458,7 +1458,7 @@ def _handle_callback_logic(call):
 
     if call.data == "accept_disclaimer":
         USER_ACCEPTED_DISCLAIMER.add(chat_id)
-        save_json_state(DISCLAIMER_FILE, list(USER_ACCEPTED_DISCLAIMER))
+        save_json_state(DISCLAIMER_FILE, USER_ACCEPTED_DISCLAIMER)
         bot.answer_callback_query(call.id, "Спасибо за подтверждение!")
         bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
         instructions = (
@@ -1994,9 +1994,9 @@ def send_welcome(message):
         USER_BLOCKED.remove(chat_id)
         
     save_json_state(STATES_FILE, USER_STATES)
-    save_json_state(DISCLAIMER_FILE, list(USER_ACCEPTED_DISCLAIMER))
+    save_json_state(DISCLAIMER_FILE, USER_ACCEPTED_DISCLAIMER)
     save_json_state(OFFTOPIC_FILE, USER_OFFTOPIC_COUNT)
-    save_json_state(BLOCKED_FILE, list(USER_BLOCKED))
+    save_json_state(BLOCKED_FILE, USER_BLOCKED)
     save_chat_history(chat_id)
         
     welcome_text = "Здравствуйте! 👋 Я медицинский координатор **Санарип**."
