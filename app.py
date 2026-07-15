@@ -101,6 +101,14 @@ def test_telegram():
 
 
 
+@app.route("/bot_logs")
+def bot_logs():
+    try:
+        with open("bot.log", "r", encoding="utf-8") as f:
+            return "<pre>" + f.read() + "</pre>"
+    except Exception as e:
+        return str(e)
+
 def init_webhook():
     """Настройка вебхука Telegram бота в фоновом режиме"""
     import threading
